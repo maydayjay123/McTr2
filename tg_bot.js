@@ -74,6 +74,31 @@ function findLastTradePnl(lines) {
   return null;
 }
 
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function formatSol(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "--";
+  return num.toFixed(8);
+}
+
+function countTrades(lines) {
+  return lines.filter((line) => line.includes("SELL confirmed")).length;
+}
+
+function computeTargetBps(stepLabel) {
+  const base = Number(process.env.PROFIT_TARGET_BPS || 200);
+  const stepBump = 25;
+  const match = String(stepLabel || "").match(/^(\\d+)/);
+  const stepNum = match ? Number(match[1]) : 1;
+  return base + Math.max(stepNum - 1, 0) * stepBump;
+}
+
 function formatStatus() {
   const state = readState();
   const lines = readLogLines();
@@ -89,6 +114,7 @@ function formatStatus() {
   const tradePnl = metrics?.tradePnl || "--";
   const walletPnl = metrics?.walletPnl || "--";
   const solBal = metrics?.solBal || "--";
+  const tradeCount = countTrades(lines);
 
   let tradePnlPct = "--";
   if (metrics?.posSol && metrics?.tradePnl) {
@@ -99,14 +125,17 @@ function formatStatus() {
     }
   }
 
+  const targetBps = computeTargetBps(step);
+  const tpPct = `${(targetBps / 100).toFixed(2)}%`;
+
   return [
-    "MM Profit Card",
-    `Mode: ${mode} | Step: ${step}`,
-    `Token: ${token}`,
-    `Avg: ${avg} | Px: ${px} | Move: ${move}`,
-    `Trade PnL: ${tradePnl} (${tradePnlPct})`,
-    `Wallet PnL: ${walletPnl} | SOL: ${solBal}`,
-    `Last Trade PnL: ${lastTradePnl || "--"}`,
+    "<b>MM Profit Card</b>",
+    `Mode: <b>${escapeHtml(mode)}</b>   Step: <b>${escapeHtml(step)}</b>   Trades: <b>${tradeCount}</b>`,
+    `Token: <b>${escapeHtml(token)}</b>`,
+    `Avg: <b>${escapeHtml(avg)}</b>   Px: <b>${escapeHtml(px)}</b>   Move: <b>${escapeHtml(move)}</b>`,
+    `TP: <b>${tpPct}</b>   Trade PnL: <b>${escapeHtml(tradePnl)}</b> (${tradePnlPct})`,
+    `Wallet PnL: <b>${formatSol(walletPnl)}</b>   SOL: <b>${formatSol(solBal)}</b>`,
+    `Last Trade PnL: <b>${formatSol(lastTradePnl || "--")}</b>`,
   ].join("\n");
 }
 
@@ -117,6 +146,7 @@ async function sendMessage(text) {
     body: JSON.stringify({
       chat_id: CHAT_ID,
       text,
+      parse_mode: "HTML",
     }),
   });
   if (!res.ok) {
