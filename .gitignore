@@ -1,7 +1,5 @@
 .env
 wallets.json
-bot_state.json
-bot.log
 ta.json
 ta_backtest.txt
 node_modules/

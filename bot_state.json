@@ -1,0 +1,16 @@
+{
+  "tokenMint": "Gbu7JAKhTVtGyRryg8cYPiKNhonXpUqbrZuCDjfUpump",
+  "mode": "in_position",
+  "stepIndex": 3,
+  "totalSolSpentLamports": "287732236",
+  "totalTokenAmount": "3708068191",
+  "tokenDecimals": 6,
+  "referencePriceScaled": "89865391",
+  "entryHighScaled": null,
+  "buySlippageBps": 100,
+  "startPriceScaled": "68697855",
+  "startSolBalanceLamports": "307229179",
+  "sessionStartTs": "2025-12-22 15:38:49",
+  "sellSlippageBps": 50,
+  "profitStreak": 0
+}
