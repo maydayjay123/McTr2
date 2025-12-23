@@ -683,7 +683,9 @@ async function main() {
     const beforeSol = BigInt(
       await connection.getBalance(keypair.publicKey, "confirmed")
     );
-    console.log(`${ts()} | SELL ${reason}...`);
+    console.log(
+      `${ts()} | SELL start | reason ${reason} | tokens ${beforeTokens.toString()} | slippage ${slippageOverrideBps ?? "auto"} bps | priority ${sellPriorityFeeLamports.toString()}`
+    );
     const effectiveSellSlippageBps = state.sellSlippageBps
       ? Number(state.sellSlippageBps)
       : sellSlippageBps;
@@ -696,6 +698,9 @@ async function main() {
       SOL_MINT,
       tokenAmount,
       slippageBps
+    );
+    console.log(
+      `${ts()} | SELL quote | in ${tokenAmount.toString()} | out ${quote.outAmount} | priceImpact ${quote.priceImpactPct ?? "n/a"}`
     );
     if (sellPriorityFeeLamports > 0n) {
       quote._swapOptions = {
@@ -729,6 +734,9 @@ async function main() {
     const afterTokens = await refreshTokenAmount();
     const afterSol = BigInt(
       await connection.getBalance(keypair.publicKey, "confirmed")
+    );
+    console.log(
+      `${ts()} | SELL balance | tokens ${beforeTokens.toString()} -> ${afterTokens.toString()} | sol ${beforeSol.toString()} -> ${afterSol.toString()}`
     );
     const tokenDecreased = afterTokens < beforeTokens;
     const solIncreased = afterSol > beforeSol + 5000n;
@@ -1030,6 +1038,11 @@ async function main() {
       ) {
         state.trailPeakBps = profitBps.toString();
         writeState(state);
+        console.log(
+          `${ts()} | TRAIL peak updated | peak ${formatPctFromBps(
+            BigInt(state.trailPeakBps)
+          )}`
+        );
       }
       const trailStopBps = BigInt(state.trailPeakBps) - trailGapBps;
       if (profitBps <= trailStopBps && profitBps >= trailMinProfitBps) {
@@ -1045,9 +1058,20 @@ async function main() {
           trailMinProfitBps
         )}`
       );
+    } else {
+      console.log(
+        `${ts()} | TRAIL idle | profit ${formatPctFromBps(
+          profitBps
+        )} | start ${formatPctFromBps(trailStartBps)}`
+      );
     }
 
     if (state.profitStreak >= profitConfirmTicks) {
+      console.log(
+        `${ts()} | PROFIT confirm | streak ${state.profitStreak} | target ${formatPctFromBps(
+          targetProfitBps
+        )}`
+      );
       const confirmQuote = await fetchQuote(
         tokenMint,
         SOL_MINT,
@@ -1058,6 +1082,11 @@ async function main() {
       const confirmProfitBps = computeBps(
         confirmOut - totalSolSpent - sellPriorityFeeLamports,
         totalSolSpent
+      );
+      console.log(
+        `${ts()} | PROFIT confirm | est ${formatPctFromBps(
+          confirmProfitBps
+        )} | out ${confirmOut.toString()}`
       );
 
       if (confirmProfitBps >= targetProfitBps) {
