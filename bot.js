@@ -36,6 +36,7 @@ const DEFAULT_PROFIT_CONFIRM_TICKS = 2;
 const DEFAULT_TRAIL_START_PCT = 8;
 const DEFAULT_TRAIL_GAP_PCT = 4;
 const DEFAULT_TRAIL_MIN_PROFIT_PCT = 3;
+const DEFAULT_SELL_PNL_LOG = "sell_pnl.log";
 const PRICE_SCALE = 1_000_000_000n;
 
 function loadWallets() {
@@ -423,6 +424,8 @@ async function main() {
   const sellSlippageCapBps = Number(
     process.env.SELL_SLIPPAGE_CAP_BPS || DEFAULT_SELL_SLIPPAGE_CAP_BPS
   );
+  const sellPnlLogPath =
+    process.env.SELL_PNL_LOG_PATH || DEFAULT_SELL_PNL_LOG;
   const confirmTimeoutMs = Number(
     process.env.CONFIRM_TIMEOUT_MS || DEFAULT_CONFIRM_TIMEOUT_MS
   );
@@ -753,6 +756,23 @@ async function main() {
       state.totalTokenAmount = afterTokens.toString();
       writeState(state);
       return false;
+    }
+    try {
+      const solDelta = afterSol - beforeSol;
+      const totalSpent = BigInt(state.totalSolSpentLamports || "0");
+      const realizedPnlLamports = solDelta - totalSpent;
+      const realizedPnlPct =
+        totalSpent > 0n
+          ? Number(realizedPnlLamports) / Number(totalSpent)
+          : 0;
+      const line = `${ts()} | pct ${(realizedPnlPct * 100).toFixed(
+        2
+      )}% | pnl ${formatSolFromLamports(
+        realizedPnlLamports
+      )} | spent ${formatSolFromLamports(totalSpent)}\n`;
+      fs.appendFileSync(sellPnlLogPath, line, "utf8");
+    } catch (err) {
+      console.log(`${ts()} | SELL pnl log failed: ${err.message || err}`);
     }
     state.stepIndex = 0;
     state.totalSolSpentLamports = "0";

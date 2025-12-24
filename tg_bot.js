@@ -161,31 +161,39 @@ function formatStatus() {
       ? `${sessionPct.toFixed(2)}%`
       : "--";
 
-  return [
-    "<b>MM Profit</b>",
+  const lines = [
+    "MM PROFIT :: STATUS",
+    "--------------------",
+    `MODE     : ${mode}`,
+    `STEP     : ${step}   TRADES: ${tradeCount}`,
+    `TOKEN    : ${tokenShort}`,
     "",
-    `Mode: <b>${escapeHtml(mode)}</b>`,
-    `Step: <b>${escapeHtml(step)}</b> | Trades: <b>${tradeCount}</b>`,
-    `Token: <b>${escapeHtml(tokenShort)}</b>`,
+    `AVG      : ${avgShort}`,
+    `PX       : ${pxShort}`,
+    `MOVE     : ${move}`,
     "",
-    `Avg: <b>${avgShort}</b>`,
-    `Px: <b>${pxShort}</b>`,
-    `Move: <b>${escapeHtml(move)}</b>`,
+    `TP TARGET: ${tpPct}`,
+    `TRAIL    : ${trailStart.toFixed(1)}%/${trailGap.toFixed(1)}%` +
+      `${trailPeak !== null ? `  PEAK ${trailPeak.toFixed(2)}%` : ""}`,
     "",
-    `TP target: <b>${tpPct}</b>`,
-    `Trail: <b>${trailStart.toFixed(1)}%</b>/<b>${trailGap.toFixed(1)}%</b>` +
-      `${trailPeak !== null ? ` | Peak <b>${trailPeak.toFixed(2)}%</b>` : ""}`,
+    `TRADE PNL: ${tradePnl} (${tradePnlPct})`,
     "",
-    `Trade PnL: <b>${escapeHtml(tradePnl)}</b> (${tradePnlPct})`,
+    `SESSION  : ${sessionStartText} -> ${sessionNowText} SOL`,
+    `SESSION$ : ${sessionPnlText} (${sessionPctText})`,
     "",
-    `Session start: <b>${sessionStartText}</b> SOL`,
-    `Session now: <b>${sessionNowText}</b> SOL`,
-    `Session PnL: <b>${sessionPnlText}</b> (${sessionPctText})`,
-    "",
-    `Wallet PnL: <b>${formatSol(walletPnl)}</b>`,
-    `SOL bal: <b>${formatSol(solBal)}</b>`,
-    `Last trade: <b>${formatSol(lastTradePnl || "--")}</b>`,
+    `WALLET   : ${formatSol(walletPnl)} SOL`,
+    `SOL BAL  : ${formatSol(solBal)} SOL`,
+    `LAST PNL : ${formatSol(lastTradePnl || "--")} SOL`,
+  ];
+
+  const width = Math.max(...lines.map((line) => line.length));
+  const border = `+${"-".repeat(width + 2)}+`;
+  const boxed = [
+    border,
+    ...lines.map((line) => `| ${line.padEnd(width)} |`),
+    border,
   ].join("\n");
+  return `<pre>${escapeHtml(boxed)}</pre>`;
 }
 
 function appendCommand(action) {
