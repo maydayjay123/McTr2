@@ -161,11 +161,13 @@ function formatStatus() {
       ? `${sessionPct.toFixed(2)}%`
       : "--";
 
-  const livePnlLine = `${tradePnl} (${tradePnlPct})`;
+  const liveSol = tradePnl;
+  const livePct = tradePnlPct;
   const liveBox = [
     "+-----------+",
     "| LIVE      |",
-    `| PNL ${livePnlLine.padEnd(7)}|`,
+    `| ${liveSol.padEnd(9)}|`,
+    `| ${livePct.padEnd(9)}|`,
     "+-----------+",
   ];
 
@@ -194,22 +196,20 @@ function formatStatus() {
     `LAST PNL : ${formatSol(lastTradePnl || "--")} SOL`,
   ];
 
-  const width = Math.max(...sheetLines.map((line) => line.length));
+  const liveWidth = liveBox[0].length;
+  const baseWidth = Math.max(...sheetLines.map((line) => line.length));
+  const width = Math.max(baseWidth, liveWidth + 2);
   const border = `+${"-".repeat(width + 2)}+`;
-  const boxedLines = [
-    border,
-    ...sheetLines.map((line) => `| ${line.padEnd(width)} |`),
-    border,
-  ];
-
-  const paddedBox = boxedLines.map((line, idx) => {
-    const overlay = liveBox[idx - 1] || " ".repeat(liveBox[0].length);
-    if (idx === 0 || idx === boxedLines.length - 1) {
-      return `${line}  ${" ".repeat(liveBox[0].length)}`;
+  const boxLines = sheetLines.map((line, idx) => {
+    const liveIdx = idx - 1;
+    if (liveIdx >= 0 && liveIdx < liveBox.length) {
+      const leftWidth = width - liveWidth - 1;
+      const left = line.padEnd(leftWidth);
+      return `| ${left} ${liveBox[liveIdx]}|`;
     }
-    return `${line}  ${overlay}`;
+    return `| ${line.padEnd(width)} |`;
   });
-  const boxed = paddedBox.join("\n");
+  const boxed = [border, ...boxLines, border].join("\n");
   return `<pre>${escapeHtml(boxed)}</pre>`;
 }
 
