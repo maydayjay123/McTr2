@@ -1053,7 +1053,9 @@ async function main() {
       writeState(state);
     }
 
-    if (profitBps >= trailStartBps) {
+    const trailArmed =
+      profitBps >= trailStartBps || state.trailPeakBps !== null;
+    if (trailArmed) {
       if (
         state.trailPeakBps === null ||
         profitBps > BigInt(state.trailPeakBps)
