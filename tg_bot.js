@@ -400,8 +400,8 @@ async function pollLoop() {
         if (chatId !== String(CHAT_ID)) continue;
         if (message.startsWith("/status")) {
           await sendMessage(formatStatus());
-        } else if (message.startsWith("/setalert")) {
-          const parts = message.trim().split(/\\s+/);
+        } else if (/^\/setalert\b/.test(message) || /^\/setalert\b/.test(message)) {
+          const parts = message.trim().split(/\s+/);
           const pct = Number(parts[1]);
           const windowSec = Number(parts[2]);
           const cooldownSec = Number(parts[3]);
@@ -413,16 +413,16 @@ async function pollLoop() {
             alertConfig = { movePct: pct, windowSec, cooldownSec };
             writeAlertConfig();
             await sendMessage(
-              `<b>Alert updated</b>\\nMOVE Δ ${pct}% in ${windowSec}s\\nCooldown ${cooldownSec}s`
+              `<b>Alert updated</b>\nPRICE delta ${pct}% in ${windowSec}s\nCooldown ${cooldownSec}s`
             );
           } else {
             await sendMessage(
-              "<b>Usage</b>: /setalert &lt;movePct&gt; &lt;windowSec&gt; &lt;cooldownSec&gt;\\nExample: /setalert 2 30 300"
+              "<b>Usage</b>: /setalert <movePct> <windowSec> <cooldownSec>\nExample: /setalert 2 30 300"
             );
           }
         } else if (message.startsWith("/alert")) {
           await sendMessage(
-            `<b>Alert</b>\\nMOVE Δ ${alertConfig.movePct}% in ${alertConfig.windowSec}s\\nCooldown ${alertConfig.cooldownSec}s`
+            `<b>Alert</b>\nPRICE delta ${alertConfig.movePct}% in ${alertConfig.windowSec}s\nCooldown ${alertConfig.cooldownSec}s`
           );
         }
       }
