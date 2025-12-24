@@ -93,11 +93,11 @@ function parseTableRow(line) {
   };
 }
 
-function parseMovePct(move) {
-  const match = String(move || "").match(/-?\\d+(?:\\.\\d+)?/);
+function parsePrice(value) {
+  const match = String(value || "").match(/-?\d+(?:\.\d+)?/);
   if (!match) return null;
-  const value = Number(match[0]);
-  return Number.isFinite(value) ? value : null;
+  const num = Number(match[0]);
+  return Number.isFinite(num) ? num : null;
 }
 
 function parseLogTime(value) {
@@ -340,33 +340,33 @@ async function checkMoveAlert() {
   const lines = readLogLines();
   const metrics = findLatestMetrics(lines);
   if (!metrics) return;
-  const movePct = parseMovePct(metrics.move);
-  if (movePct === null) return;
+  const price = parsePrice(metrics.px);
+  if (price === null) return;
   const timeMs = parseLogTime(metrics.time) || Date.now();
 
-  alertSamples.push({ ts: timeMs, movePct });
+  alertSamples.push({ ts: timeMs, price });
   const windowMs = alertConfig.windowSec * 1000;
   alertSamples = alertSamples.filter((s) => timeMs - s.ts <= windowMs);
   if (alertSamples.length < 2) return;
 
-  let min = alertSamples[0].movePct;
-  let max = alertSamples[0].movePct;
+  let min = alertSamples[0].price;
+  let max = alertSamples[0].price;
   for (const sample of alertSamples) {
-    min = Math.min(min, sample.movePct);
-    max = Math.max(max, sample.movePct);
+    min = Math.min(min, sample.price);
+    max = Math.max(max, sample.price);
   }
 
-  const delta = max - min;
+  const deltaPct = min > 0 ? ((max - min) / min) * 100 : 0;
   const now = Date.now();
-  if (delta < alertConfig.movePct) return;
+  if (deltaPct < alertConfig.movePct) return;
   if (now - lastAlertAt < alertConfig.cooldownSec * 1000) return;
   lastAlertAt = now;
 
   const oldest = alertSamples[0];
-  const direction = movePct >= oldest.movePct ? "up" : "down";
+  const direction = price >= oldest.price ? "up" : "down";
   await sendAlert(
-    `📈 <b>MOVE spike</b> ${direction} | Δ ${delta.toFixed(2)}% in ${alertConfig.windowSec}s\\n` +
-      `Current MOVE: <b>${movePct.toFixed(2)}%</b>`
+    `PRICE spike ${direction} | delta ${deltaPct.toFixed(2)}% in ${alertConfig.windowSec}s\n` +
+      `Current PX: <b>${price.toFixed(8)}</b>`
   );
 }
 
