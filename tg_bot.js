@@ -6,7 +6,10 @@ const fetch = global.fetch || require("node-fetch");
 const BOT_TOKEN = process.env.TG_BOT_TOKEN;
 const CHAT_ID = process.env.TG_CHAT_ID;
 const STATE_PATH = process.env.STATE_PATH || path.join(__dirname, "bot_state.json");
-const LOG_PATH = process.env.LOG_PATH || path.join(__dirname, "bot.log");
+const LOG_PATH =
+  process.env.LOG_PATH ||
+  process.env.BOT_LOG_PATH ||
+  path.join(__dirname, "botv2.log");
 const COMMANDS_PATH =
   process.env.TG_COMMANDS_PATH || path.join(__dirname, "tg_commands.jsonl");
 const ALERT_STATE_PATH =
@@ -79,6 +82,10 @@ function parseTableRow(line) {
   if (line.startsWith("time")) return null;
   const parts = line.split("|").map((p) => p.trim());
   if (parts.length < 10) return null;
+  const time = parts[0];
+  const mode = parts[1];
+  if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(time)) return null;
+  if (mode !== "WAIT" && mode !== "POS") return null;
   return {
     time: parts[0],
     mode: parts[1],

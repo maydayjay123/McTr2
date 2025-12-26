@@ -39,6 +39,9 @@ const DEFAULT_TRAIL_GAP_PCT = 4;
 const DEFAULT_TRAIL_MIN_PROFIT_PCT = 3;
 const DEFAULT_SELL_PNL_LOG = "sell_pnl.log";
 const PRICE_SCALE = 1_000_000_000n;
+const LOG_FILE =
+  process.env.BOT_LOG_PATH || path.join(__dirname, "botv2.log");
+const LOG_TO_CONSOLE = process.env.LOG_TO_CONSOLE !== "false";
 
 function loadWallets() {
   if (!fs.existsSync(WALLETS_FILE)) {
@@ -142,6 +145,103 @@ function formatTokenAmount(raw, decimals, maxDecimals = 6) {
 function ts() {
   return new Date().toISOString().replace("T", " ").split(".")[0];
 }
+
+const originalConsoleLog = console.log.bind(console);
+const originalConsoleError = console.error.bind(console);
+
+function safeStringify(value) {
+  if (typeof value === "bigint") {
+    return value.toString();
+  }
+  if (value instanceof Error) {
+    return value.stack || value.message || String(value);
+  }
+  if (typeof value === "object" && value !== null) {
+    if (isPlainObject(value)) {
+      return formatKeyValue(value);
+    }
+    try {
+      return JSON.stringify(value);
+    } catch (err) {
+      return String(value);
+    }
+  }
+  return String(value);
+}
+
+function formatLogArgs(args) {
+  return args.map((item) => safeStringify(item)).join(" ");
+}
+
+function isPlainObject(value) {
+  if (Object.prototype.toString.call(value) !== "[object Object]") {
+    return false;
+  }
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function formatKeyValue(obj) {
+  return Object.entries(obj)
+    .map(([key, val]) => `${key}=${safeStringify(val)}`)
+    .join(" ");
+}
+
+function shouldPrefixLine(line) {
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(line)) {
+    return false;
+  }
+  if (line.startsWith("time")) {
+    return false;
+  }
+  return true;
+}
+
+function writeLogLine(line, isError) {
+  const output = shouldPrefixLine(line) ? `${ts()} | ${line}` : line;
+  if (LOG_TO_CONSOLE) {
+    if (isError) {
+      originalConsoleError(output);
+    } else {
+      originalConsoleLog(output);
+    }
+  }
+  try {
+    fs.appendFileSync(LOG_FILE, `${output}\n`, "utf8");
+  } catch (err) {
+    if (LOG_TO_CONSOLE) {
+      originalConsoleError(
+        `${ts()} | LOG write failed: ${err.message || err}`
+      );
+    }
+  }
+}
+
+function logEvent(level, message, fields) {
+  const extra = fields && Object.keys(fields).length
+    ? ` | ${formatKeyValue(fields)}`
+    : "";
+  writeLogLine(`${level} | ${message}${extra}`, level === "ERROR");
+}
+
+function logInfo(message, fields) {
+  logEvent("INFO", message, fields);
+}
+
+function logWarn(message, fields) {
+  logEvent("WARN", message, fields);
+}
+
+function logError(message, fields) {
+  logEvent("ERROR", message, fields);
+}
+
+console.log = (...args) => {
+  writeLogLine(formatLogArgs(args), false);
+};
+console.error = (...args) => {
+  writeLogLine(`ERROR | ${formatLogArgs(args)}`, true);
+};
 
 function pad(value, width) {
   const str = String(value);
@@ -249,18 +349,24 @@ async function fetchSwapTransaction(quote, userPublicKey) {
   );
 
   let response;
+  let lastError = null;
   for (const url of urls) {
-    response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        quoteResponse: quote,
-        userPublicKey,
-        wrapAndUnwrapSol: true,
-        dynamicComputeUnitLimit: true,
-        ...(quote._swapOptions || {}),
-      }),
-    });
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          quoteResponse: quote,
+          userPublicKey,
+          wrapAndUnwrapSol: true,
+          dynamicComputeUnitLimit: true,
+          ...(quote._swapOptions || {}),
+        }),
+      });
+    } catch (err) {
+      lastError = err;
+      continue;
+    }
 
     if (response.ok) {
       break;
@@ -273,6 +379,9 @@ async function fetchSwapTransaction(quote, userPublicKey) {
   }
 
   if (!response || !response.ok) {
+    if (lastError) {
+      throw new Error(`Swap fetch failed: ${lastError.message || lastError}`);
+    }
     throw new Error(
       `Swap failed: endpoint not found (404). Tried: ${urls.join(", ")}`
     );
@@ -296,14 +405,20 @@ async function getTokenAccountBalanceInfo(connection, owner, mint) {
     return { amount: 0n, decimals: null };
   }
 
-  const tokenBalance = await connection.getTokenAccountBalance(
-    tokenAccounts.value[0].pubkey,
-    "confirmed"
+  const balances = await Promise.all(
+    tokenAccounts.value.map((account) =>
+      connection.getTokenAccountBalance(account.pubkey, "confirmed")
+    )
+  );
+  const decimals = Number(balances[0].value.decimals);
+  const amount = balances.reduce(
+    (acc, balance) => acc + BigInt(balance.value.amount),
+    0n
   );
 
   return {
-    amount: BigInt(tokenBalance.value.amount),
-    decimals: Number(tokenBalance.value.decimals),
+    amount,
+    decimals,
   };
 }
 
@@ -356,13 +471,13 @@ async function waitForSignature(connection, signature, timeoutMs) {
 
 async function main() {
   if (!RPC_URL) {
-    console.error("Missing SOLANA_RPC_URL env var.");
+    logError("Missing SOLANA_RPC_URL env var.");
     process.exit(1);
   }
 
   const wallets = loadWallets();
   if (!wallets.length) {
-    console.error("No wallets found. Run swap.js once to create a wallet.");
+    logError("No wallets found. Run swap.js once to create a wallet.");
     process.exit(1);
   }
 
@@ -377,7 +492,7 @@ async function main() {
   }
 
   if (!tokenMint) {
-    console.error("Target token mint is required.");
+    logError("Target token mint is required.");
     process.exit(1);
   }
 
@@ -397,6 +512,9 @@ async function main() {
   const pollMs = Number(process.env.POLL_MS || DEFAULT_POLL_MS);
   const priceSampleSol = Number(
     process.env.PRICE_SAMPLE_SOL || DEFAULT_PRICE_SAMPLE_SOL
+  );
+  const entryDropPct = Number(
+    process.env.ENTRY_DROP_PCT || DEFAULT_ENTRY_DROP_PCT
   );
   const buySlippageBps = Number(
     process.env.BUY_SLIPPAGE_BPS || DEFAULT_BUY_SLIPPAGE_BPS
@@ -456,6 +574,10 @@ async function main() {
     )
   );
 
+  logInfo("LOG settings", {
+    file: LOG_FILE,
+    console: LOG_TO_CONSOLE ? "on" : "off",
+  });
 
   let state = readState();
   if (!state || state.tokenMint !== tokenMint) {
@@ -477,22 +599,22 @@ async function main() {
     state.mode = "waiting_entry";
     state.done = false;
   }
-  if (!state.entryHighScaled) {
+  if (state.entryHighScaled === undefined) {
     state.entryHighScaled = null;
   }
-  if (!state.buySlippageBps) {
+  if (state.buySlippageBps === undefined) {
     state.buySlippageBps = null;
   }
-  if (!state.sellSlippageBps) {
+  if (state.sellSlippageBps === undefined) {
     state.sellSlippageBps = null;
   }
-  if (!state.sellPriorityFeeLamports) {
+  if (state.sellPriorityFeeLamports === undefined) {
     state.sellPriorityFeeLamports = null;
   }
-  if (!state.profitStreak) {
+  if (state.profitStreak === undefined) {
     state.profitStreak = 0;
   }
-  if (!state.trailPeakBps) {
+  if (state.trailPeakBps === undefined) {
     state.trailPeakBps = null;
   }
   state.startPriceScaled = null;
@@ -516,13 +638,12 @@ async function main() {
         (pct) => (allocLamports * BigInt(Math.round(pct * 100))) / 10000n
       );
       const pctTotal = sumNumbers(stepPct);
-      console.log(
-        `${ts()} | CONFIG step pct ${stepPct.join(
-          ","
-        )} (total ${pctTotal}%) | alloc ${tradeAllocPct}% -> ${formatSolFromLamports(
-          allocLamports
-        )} SOL`
-      );
+      logInfo("CONFIG step pct", {
+        steps: stepPct.join(","),
+        totalPct: pctTotal,
+        allocPct: tradeAllocPct,
+        allocSol: formatSolFromLamports(allocLamports),
+      });
     }
     return lamports;
   }
@@ -530,11 +651,25 @@ async function main() {
   let stepLamports = computeStepLamports(BigInt(sessionStartBalance));
 
   if (stepLamports.length !== stepDrawdown.length) {
-    console.error(
-      "Step amounts length does not match STEP_DRAWDOWN_PCT length."
-    );
+    logError("Step amounts length does not match STEP_DRAWDOWN_PCT length.");
     process.exit(1);
   }
+
+  logInfo("CONFIG trade", {
+    token: tokenMint,
+    steps: stepLamports.map((lamports) => formatSolFromLamports(lamports)).join(","),
+    drawdown: `${stepDrawdown.join(",")}%`,
+    profit: formatPctFromBps(targetProfitBps),
+    pollMs,
+    entryDropPct,
+  });
+  logInfo("CONFIG execution", {
+    buySlipBps: buySlippageBps,
+    sellSlipBps: sellSlippageBps,
+    buyFee: buyPriorityFeeLamports.toString(),
+    sellFee: sellPriorityFeeLamports.toString(),
+    trail: `${formatPctFromBps(trailStartBps)}/${formatPctFromBps(trailGapBps)}/${formatPctFromBps(trailMinProfitBps)}`,
+  });
 
   let lineCount = 0;
   function printHeader() {
@@ -585,9 +720,11 @@ async function main() {
       "confirmed"
     );
     if (BigInt(solBalance) < lamports + 5000n) {
-      console.log(
-        `Insufficient SOL for step ${stepIndex + 1}. Balance ${solBalance} lamports, need ${lamports.toString()}.`
-      );
+      logWarn("Insufficient SOL for step", {
+        step: stepIndex + 1,
+        balanceLamports: solBalance,
+        needLamports: lamports.toString(),
+      });
       return false;
     }
 
@@ -597,13 +734,16 @@ async function main() {
       mintPubkey
     );
     const beforeSol = BigInt(solBalance);
-    const effectiveBuySlippageBps = state.buySlippageBps
-      ? Number(state.buySlippageBps)
-      : buySlippageBps;
+    const effectiveBuySlippageBps =
+      state.buySlippageBps !== null && state.buySlippageBps !== undefined
+        ? Number(state.buySlippageBps)
+        : buySlippageBps;
 
-    console.log(
-      `${ts()} | BUY step ${stepIndex + 1}: ${solAmountDisplay} SOL`
-    );
+    logInfo("BUY start", {
+      step: stepIndex + 1,
+      sol: solAmountDisplay,
+      slippageBps: effectiveBuySlippageBps,
+    });
     const quote = await fetchQuote(
       SOL_MINT,
       tokenMint,
@@ -619,11 +759,10 @@ async function main() {
     try {
       result = await executeSwap(connection, keypair, quote, confirmTimeoutMs);
     } catch (err) {
-      console.log(
-        `${ts()} | BUY failed: ${formatSwapError(
-          err
-        )} | slippage ${effectiveBuySlippageBps} bps`
-      );
+      logWarn("BUY failed", {
+        error: formatSwapError(err),
+        slippageBps: effectiveBuySlippageBps,
+      });
       const nextBps = Math.min(
         effectiveBuySlippageBps + buySlippageStepBps,
         buySlippageCapBps
@@ -637,11 +776,11 @@ async function main() {
       return false;
     }
     if (result.confirmed) {
-      console.log(`${ts()} | BUY confirmed: ${result.signature}`);
+      logInfo("BUY confirmed", { signature: result.signature });
     } else {
-      console.log(
-        `${ts()} | BUY sent but not confirmed in time: ${result.signature}. Checking balance...`
-      );
+      logWarn("BUY sent but not confirmed in time", {
+        signature: result.signature,
+      });
     }
 
     const afterTokens = await refreshTokenAmount();
@@ -650,9 +789,9 @@ async function main() {
     );
     if (afterTokens <= beforeTokens.amount) {
       if (afterSol >= beforeSol - 5000n) {
-        console.log(
-          `${ts()} | BUY failed: SOL balance unchanged. Will retry with higher slippage.`
-        );
+        logWarn("BUY failed: SOL balance unchanged, retrying with higher slippage", {
+          slippageBps: effectiveBuySlippageBps,
+        });
         const nextBps = Math.min(
           effectiveBuySlippageBps + buySlippageStepBps,
           buySlippageCapBps
@@ -665,9 +804,7 @@ async function main() {
         }
         return false;
       }
-      console.log(
-        `${ts()} | BUY pending: SOL spent but tokens not seen yet.`
-      );
+      logWarn("BUY pending: SOL spent but tokens not seen yet");
       if (fromEntry) {
         state.mode = "waiting_entry";
         writeState(state);
@@ -688,7 +825,7 @@ async function main() {
   async function doSell(reason, currentPriceScaled, slippageOverrideBps) {
     const tokenAmount = BigInt(state.totalTokenAmount);
     if (tokenAmount <= 0n) {
-      console.log("No tokens to sell.");
+      logWarn("No tokens to sell");
       return false;
     }
 
@@ -696,15 +833,21 @@ async function main() {
     const beforeSol = BigInt(
       await connection.getBalance(keypair.publicKey, "confirmed")
     );
-    const effectiveSellPriorityFeeLamports = state.sellPriorityFeeLamports
-      ? BigInt(state.sellPriorityFeeLamports)
-      : sellPriorityFeeLamports;
-    console.log(
-      `${ts()} | SELL start | reason ${reason} | tokens ${beforeTokens.toString()} | slippage ${slippageOverrideBps ?? "auto"} bps | priority ${effectiveSellPriorityFeeLamports.toString()}`
-    );
-    const effectiveSellSlippageBps = state.sellSlippageBps
-      ? Number(state.sellSlippageBps)
-      : sellSlippageBps;
+    const effectiveSellPriorityFeeLamports =
+      state.sellPriorityFeeLamports !== null &&
+      state.sellPriorityFeeLamports !== undefined
+        ? BigInt(state.sellPriorityFeeLamports)
+        : sellPriorityFeeLamports;
+    logInfo("SELL start", {
+      reason,
+      tokens: beforeTokens.toString(),
+      slippageBps: slippageOverrideBps ?? "auto",
+      priorityFee: effectiveSellPriorityFeeLamports.toString(),
+    });
+    const effectiveSellSlippageBps =
+      state.sellSlippageBps !== null && state.sellSlippageBps !== undefined
+        ? Number(state.sellSlippageBps)
+        : sellSlippageBps;
     const slippageBps =
       slippageOverrideBps !== undefined
         ? slippageOverrideBps
@@ -715,9 +858,23 @@ async function main() {
       tokenAmount,
       slippageBps
     );
-    console.log(
-      `${ts()} | SELL quote | in ${tokenAmount.toString()} | out ${quote.outAmount} | priceImpact ${quote.priceImpactPct ?? "n/a"}`
-    );
+    logInfo("SELL quote", {
+      inAmount: tokenAmount.toString(),
+      outAmount: quote.outAmount,
+      priceImpact: quote.priceImpactPct ?? "n/a",
+    });
+    const estOutLamports = BigInt(quote.outAmount);
+    const totalSpentLamports = BigInt(state.totalSolSpentLamports || "0");
+    const estProfitLamports =
+      estOutLamports - totalSpentLamports - effectiveSellPriorityFeeLamports;
+    if (estProfitLamports < 0n) {
+      logWarn("SELL blocked: estimated loss", {
+        estPnl: formatSolFromLamports(estProfitLamports),
+        spent: formatSolFromLamports(totalSpentLamports),
+        out: formatSolFromLamports(estOutLamports),
+      });
+      return false;
+    }
     if (effectiveSellPriorityFeeLamports > 0n) {
       quote._swapOptions = {
         prioritizationFeeLamports: Number(effectiveSellPriorityFeeLamports),
@@ -727,11 +884,10 @@ async function main() {
     try {
       result = await executeSwap(connection, keypair, quote, confirmTimeoutMs);
     } catch (err) {
-      console.log(
-        `${ts()} | SELL failed: ${formatSwapError(
-          err
-        )} | slippage ${slippageBps} bps`
-      );
+      logWarn("SELL failed", {
+        error: formatSwapError(err),
+        slippageBps: slippageBps,
+      });
       const nextBps = Math.min(
         effectiveSellSlippageBps + sellSlippageStepBps,
         sellSlippageCapBps
@@ -749,31 +905,37 @@ async function main() {
       return false;
     }
     if (result.confirmed) {
-      console.log(`${ts()} | SELL confirmed: ${result.signature}`);
+      logInfo("SELL confirmed", { signature: result.signature });
     } else {
-      console.log(
-        `${ts()} | SELL sent but not confirmed in time: ${result.signature}. Checking balance...`
-      );
+      logWarn("SELL sent but not confirmed in time", {
+        signature: result.signature,
+      });
     }
     const afterTokens = await refreshTokenAmount();
     const afterSol = BigInt(
       await connection.getBalance(keypair.publicKey, "confirmed")
     );
-    console.log(
-      `${ts()} | SELL balance | tokens ${beforeTokens.toString()} -> ${afterTokens.toString()} | sol ${beforeSol.toString()} -> ${afterSol.toString()}`
-    );
+    logInfo("SELL balance", {
+      tokensBefore: beforeTokens.toString(),
+      tokensAfter: afterTokens.toString(),
+      solBefore: beforeSol.toString(),
+      solAfter: afterSol.toString(),
+    });
     const tokenDecreased = afterTokens < beforeTokens;
     const solIncreased = afterSol > beforeSol + 5000n;
     if (!tokenDecreased && !solIncreased) {
-      console.log(
-        `${ts()} | SELL failed or pending: balances unchanged. tokens ${beforeTokens.toString()} -> ${afterTokens.toString()}, sol ${beforeSol.toString()} -> ${afterSol.toString()}`
-      );
+      logWarn("SELL failed or pending: balances unchanged", {
+        tokensBefore: beforeTokens.toString(),
+        tokensAfter: afterTokens.toString(),
+        solBefore: beforeSol.toString(),
+        solAfter: afterSol.toString(),
+      });
       return false;
     }
     if (afterTokens > 0n) {
-      console.log(
-        `${ts()} | SELL partial: remaining tokens ${afterTokens.toString()}. Staying in position.`
-      );
+      logWarn("SELL partial: remaining tokens, staying in position", {
+        remainingTokens: afterTokens.toString(),
+      });
       state.totalTokenAmount = afterTokens.toString();
       writeState(state);
       return false;
@@ -793,7 +955,7 @@ async function main() {
       )} | spent ${formatSolFromLamports(totalSpent)}\n`;
       fs.appendFileSync(sellPnlLogPath, line, "utf8");
     } catch (err) {
-      console.log(`${ts()} | SELL pnl log failed: ${err.message || err}`);
+      logWarn("SELL pnl log failed", { error: err.message || err });
     }
     state.stepIndex = 0;
     state.totalSolSpentLamports = "0";
@@ -809,11 +971,12 @@ async function main() {
   }
 
   while (true) {
+    try {
     if (state.mode === "in_position") {
       const totalSolSpent = BigInt(state.totalSolSpentLamports);
       const tokenAmount = await refreshTokenAmount();
       if (tokenAmount === 0n && totalSolSpent === 0n) {
-        console.log(`${ts()} | POS empty position. Switching to entry mode.`);
+        logInfo("POS empty position. Switching to entry mode.");
         state.mode = "waiting_entry";
         state.entryHighScaled = null;
         writeState(state);
@@ -874,11 +1037,7 @@ async function main() {
             BigInt(state.startPriceScaled)
           )
         : 0n;
-      const entryDropBps = BigInt(
-        Math.round(
-          Number(process.env.ENTRY_DROP_PCT || DEFAULT_ENTRY_DROP_PCT) * 100
-        )
-      );
+      const entryDropBps = BigInt(Math.round(entryDropPct * 100));
 
       const solBalLamports = BigInt(
         await connection.getBalance(keypair.publicKey, "confirmed")
@@ -909,7 +1068,7 @@ async function main() {
           state.entryHighScaled = null;
           writeState(state);
         } else {
-          console.log(`${ts()} | BUY step 1 will retry on next tick.`);
+          logWarn("BUY step 1 will retry on next tick.");
         }
       }
 
@@ -924,7 +1083,7 @@ async function main() {
       const bought = await doBuy(0);
       await new Promise((resolve) => setTimeout(resolve, pollMs));
       if (!bought) {
-        console.log(`${ts()} | BUY step 1 will retry on next tick.`);
+        logWarn("BUY step 1 will retry on next tick.");
       }
       continue;
     }
@@ -936,9 +1095,7 @@ async function main() {
           "confirmed"
         );
         if (BigInt(solBal) >= totalSolSpent) {
-          console.log(
-            `${ts()} | POS waiting: no tokens and no SOL spent. Resetting to entry mode.`
-          );
+          logInfo("POS waiting: no tokens and no SOL spent. Resetting to entry mode.");
           state.mode = "waiting_entry";
           state.entryHighScaled = null;
           state.stepIndex = 0;
@@ -958,7 +1115,7 @@ async function main() {
       printRow({
         time: ts(),
         mode: "POS",
-        step: `${state.stepIndex}/${stepSol.length}`,
+        step: `${state.stepIndex}/${stepLamports.length}`,
         avg: "-",
         px: "-",
         move: "pending",
@@ -980,7 +1137,7 @@ async function main() {
     );
     const outAmountRaw = BigInt(priceQuote.outAmount);
     if (outAmountRaw === 0n) {
-      console.log("Price quote returned 0 output. Waiting...");
+      logWarn("Price quote returned 0 output. Waiting...");
       await new Promise((resolve) => setTimeout(resolve, pollMs));
       continue;
     }
@@ -1010,7 +1167,7 @@ async function main() {
       )} SOL/token`;
     }
 
-    if (state.stepIndex < stepSol.length) {
+    if (state.stepIndex < stepLamports.length) {
       const triggerBps = BigInt(
         Math.round(stepDrawdown[state.stepIndex] * 100)
       );
@@ -1018,9 +1175,9 @@ async function main() {
         const bought = await doBuy(state.stepIndex);
         await new Promise((resolve) => setTimeout(resolve, pollMs));
         if (!bought) {
-          console.log(
-            `${ts()} | BUY step ${state.stepIndex + 1} will retry on next tick.`
-          );
+          logWarn("BUY step will retry on next tick", {
+            step: state.stepIndex + 1,
+          });
         }
         continue;
       }
@@ -1033,9 +1190,11 @@ async function main() {
       sellSlippageBps
     );
     const estSolOut = BigInt(sellQuote.outAmount);
-    const effectiveSellPriorityFeeLamports = state.sellPriorityFeeLamports
-      ? BigInt(state.sellPriorityFeeLamports)
-      : sellPriorityFeeLamports;
+    const effectiveSellPriorityFeeLamports =
+      state.sellPriorityFeeLamports !== null &&
+      state.sellPriorityFeeLamports !== undefined
+        ? BigInt(state.sellPriorityFeeLamports)
+        : sellPriorityFeeLamports;
     const priorityCost = effectiveSellPriorityFeeLamports;
     const profitBps = computeBps(
       estSolOut - totalSolSpent - priorityCost,
@@ -1060,7 +1219,7 @@ async function main() {
     printRow({
       time: ts(),
       mode: "POS",
-      step: `${state.stepIndex}/${stepSol.length}`,
+      step: `${state.stepIndex}/${stepLamports.length}`,
       avg: avgDisplay.replace(" SOL/token", ""),
       px: currentDisplay.replace(" SOL/token", ""),
       move: formatPctFromBps(drawdownBps),
@@ -1087,40 +1246,33 @@ async function main() {
       ) {
         state.trailPeakBps = profitBps.toString();
         writeState(state);
-        console.log(
-          `${ts()} | TRAIL peak updated | peak ${formatPctFromBps(
-            BigInt(state.trailPeakBps)
-          )}`
-        );
+        logInfo("TRAIL peak updated", {
+          peak: formatPctFromBps(BigInt(state.trailPeakBps)),
+        });
       }
       const trailStopBps = BigInt(state.trailPeakBps) - trailGapBps;
       if (profitBps <= trailStopBps && profitBps >= trailMinProfitBps) {
         await doSell("trailing stop hit", currentPriceScaled, sellSlippageBps);
         continue;
       }
-      console.log(
-        `${ts()} | TRAIL check | profit ${formatPctFromBps(
-          profitBps
-        )} | peak ${formatPctFromBps(
-          BigInt(state.trailPeakBps)
-        )} | stop ${formatPctFromBps(trailStopBps)} | min ${formatPctFromBps(
-          trailMinProfitBps
-        )}`
-      );
+      logInfo("TRAIL check", {
+        profit: formatPctFromBps(profitBps),
+        peak: formatPctFromBps(BigInt(state.trailPeakBps)),
+        stop: formatPctFromBps(trailStopBps),
+        min: formatPctFromBps(trailMinProfitBps),
+      });
     } else {
-      console.log(
-        `${ts()} | TRAIL idle | profit ${formatPctFromBps(
-          profitBps
-        )} | start ${formatPctFromBps(trailStartBps)}`
-      );
+      logInfo("TRAIL idle", {
+        profit: formatPctFromBps(profitBps),
+        start: formatPctFromBps(trailStartBps),
+      });
     }
 
     if (state.profitStreak >= profitConfirmTicks) {
-      console.log(
-        `${ts()} | PROFIT confirm | streak ${state.profitStreak} | target ${formatPctFromBps(
-          targetProfitBps
-        )}`
-      );
+      logInfo("PROFIT confirm", {
+        streak: state.profitStreak,
+        target: formatPctFromBps(targetProfitBps),
+      });
       const confirmQuote = await fetchQuote(
         tokenMint,
         SOL_MINT,
@@ -1129,33 +1281,35 @@ async function main() {
       );
       const confirmOut = BigInt(confirmQuote.outAmount);
       const confirmProfitBps = computeBps(
-        confirmOut - totalSolSpent - sellPriorityFeeLamports,
+        confirmOut - totalSolSpent - effectiveSellPriorityFeeLamports,
         totalSolSpent
       );
-      console.log(
-        `${ts()} | PROFIT confirm | est ${formatPctFromBps(
-          confirmProfitBps
-        )} | out ${confirmOut.toString()}`
-      );
+      logInfo("PROFIT confirm quote", {
+        est: formatPctFromBps(confirmProfitBps),
+        out: confirmOut.toString(),
+      });
 
       if (confirmProfitBps >= targetProfitBps) {
         await doSell("profit target hit", currentPriceScaled, sellSlippageBps);
       } else {
-        console.log(
-          `${ts()} | PROFIT confirm failed: ${formatPctFromBps(
-            confirmProfitBps
-          )} < target ${formatPctFromBps(targetProfitBps)}`
-        );
+        logWarn("PROFIT confirm failed", {
+          est: formatPctFromBps(confirmProfitBps),
+          target: formatPctFromBps(targetProfitBps),
+        });
       }
       continue;
     }
 
 
     await new Promise((resolve) => setTimeout(resolve, pollMs));
+    } catch (err) {
+      logError("Loop error", { error: err.message || err });
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
   }
 }
 
 main().catch((err) => {
-  console.error("Bot failed:", err.message || err);
+  logError("Bot failed", { error: err.message || err });
   process.exit(1);
 });
