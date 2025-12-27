@@ -164,6 +164,38 @@ function computeTargetBps(stepLabel) {
   return base + Math.max(stepNum - 1, 0) * stepBump;
 }
 
+function parseStepSol() {
+  const raw = process.env.STEP_SOL_AMOUNTS;
+  if (!raw) return null;
+  const values = raw
+    .split(",")
+    .map((v) => Number(v.trim()))
+    .filter((v) => Number.isFinite(v) && v > 0);
+  return values.length ? values : null;
+}
+
+function parseStepPct() {
+  const raw = process.env.STEP_SOL_PCT;
+  if (!raw) return null;
+  const values = raw
+    .split(",")
+    .map((v) => Number(v.trim()))
+    .filter((v) => Number.isFinite(v) && v > 0);
+  return values.length ? values : null;
+}
+
+function formatStepPlan() {
+  const stepSol = parseStepSol();
+  const stepPct = parseStepPct();
+  if (stepSol) {
+    return stepSol.map((v) => v.toFixed(3)).join(",");
+  }
+  if (stepPct) {
+    return stepPct.map((v) => `${v.toFixed(1)}%`).join(",");
+  }
+  return "--";
+}
+
 function formatStatus() {
   const state = readState();
   const lines = readLogLines();
@@ -183,15 +215,9 @@ function formatStatus() {
   const trailStart = Number(process.env.TRAILING_START_PCT || 0);
   const trailGap = Number(process.env.TRAILING_GAP_PCT || 0);
   const trailPeak = state?.trailPeakBps ? Number(state.trailPeakBps) / 100 : null;
-
-  let tradePnlPct = "--";
-  if (metrics?.posSol && metrics?.tradePnl) {
-    const posSol = Number(metrics.posSol);
-    const tradePnlNum = Number(metrics.tradePnl);
-    if (Number.isFinite(posSol) && posSol !== 0 && Number.isFinite(tradePnlNum)) {
-      tradePnlPct = `${((tradePnlNum / posSol) * 100).toFixed(2)}%`;
-    }
-  }
+  const trailStop =
+    trailPeak !== null ? trailPeak - trailGap : null;
+  const trailMin = Number(process.env.TRAILING_MIN_PROFIT_PCT || 0);
 
   const targetBps = computeTargetBps(step);
   const tpPct = `${(targetBps / 100).toFixed(2)}%`;
@@ -218,30 +244,22 @@ function formatStatus() {
       ? `${sessionPct.toFixed(2)}%`
       : "--";
 
-  const liveSol = tradePnl;
-  const livePct = tradePnlPct;
-  const liveBox = [
-    "+-----------+",
-    "| LIVE      |",
-    `| ${liveSol.padEnd(9)}|`,
-    `| ${livePct.padEnd(9)}|`,
-    "+-----------+",
-  ];
-
   const sheetLines = [
     "MM PROFIT :: STATUS",
     "--------------------",
     `MODE     : ${mode}`,
     `STEP     : ${step}   TRADES: ${tradeCount}`,
     `TOKEN    : ${tokenShort}`,
+    `STEPS    : ${formatStepPlan()}`,
     "",
     `AVG      : ${avgShort}`,
     `PX       : ${pxShort}`,
     `MOVE     : ${move}`,
+    `LIVE PNL : ${formatSol(tradePnl)} SOL`,
     "",
     `TP TARGET: ${tpPct}`,
-    `TRAIL    : ${trailStart.toFixed(1)}%/${trailGap.toFixed(1)}%` +
-      `${trailPeak !== null ? `  PEAK ${trailPeak.toFixed(2)}%` : ""}`,
+    `TRAIL    : start ${trailStart.toFixed(1)}% gap ${trailGap.toFixed(1)}% min ${trailMin.toFixed(1)}%`,
+    `TRAIL POS: ${trailPeak !== null ? `peak ${trailPeak.toFixed(2)}% stop ${trailStop.toFixed(2)}%` : "idle"}`,
     "",
     `SESSION  : ${sessionStartText} -> ${sessionNowText} SOL`,
     `SESSION$ : ${sessionPnlText} (${sessionPctText})`,
@@ -252,22 +270,12 @@ function formatStatus() {
   ];
 
   const innerPad = 1;
-  const gap = "  ";
-  const liveWidth = liveBox[0].length;
   const baseWidth = Math.max(...sheetLines.map((line) => line.length));
-  const leftBlockWidth = baseWidth + innerPad * 2;
-  const totalWidth = Math.max(leftBlockWidth + gap.length + liveWidth, leftBlockWidth);
+  const totalWidth = baseWidth + innerPad * 2;
   const border = `+${"-".repeat(totalWidth + 2)}+`;
 
-  const liveRowStart = 2;
-  const boxLines = sheetLines.map((line, idx) => {
-    const liveIdx = idx - liveRowStart;
-    const left = " ".repeat(innerPad) + line.padEnd(baseWidth) + " ".repeat(innerPad);
-    const right =
-      liveIdx >= 0 && liveIdx < liveBox.length
-        ? gap + liveBox[liveIdx]
-        : " ".repeat(gap.length + liveWidth);
-    const content = (left + right).padEnd(totalWidth);
+  const boxLines = sheetLines.map((line) => {
+    const content = " ".repeat(innerPad) + line.padEnd(baseWidth) + " ".repeat(innerPad);
     return `| ${content} |`;
   });
   const boxed = [border, ...boxLines, border].join("\n");
