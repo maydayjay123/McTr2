@@ -259,6 +259,7 @@ function formatTableRow(row) {
     pad(row.avg, 14),
     pad(row.px, 14),
     pad(row.move, 10),
+    pad(row.stepPct, 9),
     pad(row.posSol, 10),
     pad(row.tradePnl, 10),
     pad(row.walletPnl, 10),
@@ -681,6 +682,7 @@ async function main() {
         pad("avg", 14),
         pad("px", 14),
         pad("move", 10),
+        pad("step%", 9),
         pad("pos_sol", 10),
         pad("trade_pnl", 10),
         pad("wallet_pnl", 10),
@@ -999,11 +1001,12 @@ async function main() {
           step: "-",
           avg: "-",
           px: "-",
-          move: "0.00%",
-          posSol: "0.000000",
-          tradePnl: "0.000000",
-          walletPnl: "0.000000",
-          solBal: "0.000000",
+        move: "0.00%",
+        stepPct: "--",
+        posSol: "0.000000",
+        tradePnl: "0.000000",
+        walletPnl: "0.000000",
+        solBal: "0.000000",
         });
         await new Promise((resolve) => setTimeout(resolve, pollMs));
         continue;
@@ -1053,6 +1056,7 @@ async function main() {
         avg: "-",
         px: "-",
         move: `${formatPctFromBps(dropBps)}|${formatPctFromBps(entryDropBps)}`,
+        stepPct: formatPctFromBps(entryDropBps),
         posSol: "0.000000",
         tradePnl: "0.000000",
         walletPnl: formatSolFromLamports(walletPnl),
@@ -1119,6 +1123,10 @@ async function main() {
         avg: "-",
         px: "-",
         move: "pending",
+        stepPct:
+          state.stepIndex < stepLamports.length
+            ? `${stepDrawdown[state.stepIndex].toFixed(2)}%`
+            : "--",
         posSol: "0.000000",
         tradePnl: "0.000000",
         walletPnl: formatSolFromLamports(walletPnl),
@@ -1223,6 +1231,10 @@ async function main() {
       avg: avgDisplay.replace(" SOL/token", ""),
       px: currentDisplay.replace(" SOL/token", ""),
       move: formatPctFromBps(drawdownBps),
+      stepPct:
+        state.stepIndex < stepLamports.length
+          ? `${stepDrawdown[state.stepIndex].toFixed(2)}%`
+          : "--",
       posSol: formatSolFromLamports(estSolOut),
       tradePnl: formatSolFromLamports(profitLamports),
       walletPnl: formatSolFromLamports(walletPnl),
