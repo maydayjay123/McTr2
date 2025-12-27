@@ -219,6 +219,15 @@ function formatStatus() {
     trailPeak !== null ? trailPeak - trailGap : null;
   const trailMin = Number(process.env.TRAILING_MIN_PROFIT_PCT || 0);
 
+  let livePnlPct = "--";
+  if (metrics?.posSol && metrics?.tradePnl) {
+    const posSol = Number(metrics.posSol);
+    const tradePnlNum = Number(metrics.tradePnl);
+    if (Number.isFinite(posSol) && posSol !== 0 && Number.isFinite(tradePnlNum)) {
+      livePnlPct = `${((tradePnlNum / posSol) * 100).toFixed(2)}%`;
+    }
+  }
+
   const targetBps = computeTargetBps(step);
   const tpPct = `${(targetBps / 100).toFixed(2)}%`;
 
@@ -226,6 +235,14 @@ function formatStatus() {
     token.length > 16 ? `${token.slice(0, 6)}...${token.slice(-6)}` : token;
   const avgShort = avg === "--" ? "--" : Number(avg).toFixed(8);
   const pxShort = px === "--" ? "--" : Number(px).toFixed(8);
+  let avgDiffPct = "--";
+  if (avgShort !== "--" && pxShort !== "--") {
+    const avgNum = Number(avgShort);
+    const pxNum = Number(pxShort);
+    if (Number.isFinite(avgNum) && avgNum !== 0 && Number.isFinite(pxNum)) {
+      avgDiffPct = `${(((pxNum - avgNum) / avgNum) * 100).toFixed(2)}%`;
+    }
+  }
   const startSol = lamportsToSol(state?.startSolBalanceLamports);
   const currentSol = Number.isFinite(Number(solBal)) ? Number(solBal) : null;
   const sessionPnl =
@@ -254,8 +271,9 @@ function formatStatus() {
     "",
     `AVG      : ${avgShort}`,
     `PX       : ${pxShort}`,
-    `MOVE     : ${move}`,
-    `LIVE PNL : ${formatSol(tradePnl)} SOL`,
+    `PX MOVE  : ${move}`,
+    `AVG vs PX: ${avgDiffPct}`,
+    `LIVE PNL : ${formatSol(tradePnl)} SOL (${livePnlPct})`,
     "",
     `TP TARGET: ${tpPct}`,
     `TRAIL    : start ${trailStart.toFixed(1)}% gap ${trailGap.toFixed(1)}% min ${trailMin.toFixed(1)}%`,
