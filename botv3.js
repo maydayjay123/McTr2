@@ -700,13 +700,12 @@ async function main() {
     process.env.STEP_SOL_AMOUNTS,
     DEFAULT_STEP_SOL
   );
-  const stepDrawdown = state.settings.stepDrawdownPct || DEFAULT_STEP_DRAWDOWN_PCT;
-  let targetProfitBps = BigInt(Number(state.settings.minProfitBps));
+  let targetProfitBps = BigInt(DEFAULT_PROFIT_BPS);
   const pollMs = Number(process.env.POLL_MS || DEFAULT_POLL_MS);
   const priceSampleSol = Number(
     process.env.PRICE_SAMPLE_SOL || DEFAULT_PRICE_SAMPLE_SOL
   );
-  let entryDropPct = Number(state.settings.entryDropPct);
+  let entryDropPct = DEFAULT_ENTRY_DROP_PCT;
   const buySlippageBps = Number(
     process.env.BUY_SLIPPAGE_BPS || DEFAULT_BUY_SLIPPAGE_BPS
   );
@@ -832,6 +831,10 @@ async function main() {
   }
   keypair = keypairFromEntry(wallets[state.activeWalletIndex]);
   state.activeWalletPubkey = wallets[state.activeWalletIndex]?.publicKey || null;
+  const stepDrawdown =
+    state.settings.stepDrawdownPct || DEFAULT_STEP_DRAWDOWN_PCT;
+  targetProfitBps = BigInt(Number(state.settings.minProfitBps));
+  entryDropPct = Number(state.settings.entryDropPct);
   state.startPriceScaled = null;
   state.startSolBalanceLamports = null;
   state.sessionStartTs = ts();
