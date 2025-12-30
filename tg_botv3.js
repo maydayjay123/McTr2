@@ -39,12 +39,9 @@ if (!BOT_TOKEN || !CHAT_ID) {
 const API_BASE = `https://api.telegram.org/bot${BOT_TOKEN}`;
 let updateOffset = 0;
 let walletViewIndex = null;
-const lastPanelMessageIds = {
-  status: null,
-  lab: null,
-  stats: null,
-  wallet: null,
-};
+let lastPanelMessageId = null;
+let lastPanelChatId = null;
+let lastPanelType = "status";
 let alertConfig = {
   movePct: DEFAULT_ALERT_MOVE_PCT,
   windowSec: DEFAULT_ALERT_WINDOW_SEC,
@@ -210,6 +207,19 @@ function formatSol(value) {
   const num = Number(value);
   if (!Number.isFinite(num)) return "--";
   return num.toFixed(8);
+}
+
+function formatTokenAmount(raw, decimals, maxDecimals = 6) {
+  const num = Number(raw);
+  if (!Number.isFinite(num)) return "--";
+  if (!Number.isFinite(decimals) || decimals <= 0) {
+    return num.toFixed(0);
+  }
+  const factor = 10 ** decimals;
+  const whole = Math.floor(num / factor);
+  const frac = Math.abs(num % factor);
+  const fracStr = frac.toString().padStart(decimals, "0").slice(0, maxDecimals);
+  return `${whole}.${fracStr}`;
 }
 
 function lamportsToSol(value) {
@@ -392,6 +402,34 @@ function formatStatus(index) {
   return `<pre>${escapeHtml(boxed)}</pre>`;
 }
 
+function formatWalletCard(index) {
+  const paths = getPathsForIndex(index);
+  const state = readState(paths.statePath);
+  const lines = readLogLines(paths.logPath);
+  const metrics = findLatestMetrics(lines);
+  const walletIndex =
+    typeof state?.activeWalletIndex === "number"
+      ? state.activeWalletIndex
+      : index ?? "--";
+  const walletPubkey = state?.activeWalletPubkey || "--";
+  const solBal = metrics?.solBal || "--";
+  const tokenRaw = state?.totalTokenAmount || "0";
+  const tokenDecimals = state?.tokenDecimals ?? null;
+  const tokenMint = state?.tokenMint || "--";
+
+  const header = "<b>Wallet</b>";
+  const body = [
+    `Index: <b>${walletIndex}</b>`,
+    `Address: <code>${escapeHtml(walletPubkey)}</code>`,
+    `SOL balance: <b>${formatSol(solBal)}</b>`,
+    `Token (${escapeHtml(tokenMint)}): <b>${formatTokenAmount(
+      tokenRaw,
+      tokenDecimals
+    )}</b>`,
+  ];
+  return `${header}\n${body.join("\n")}`;
+}
+
 function formatLab(index) {
   const paths = getPathsForIndex(index);
   const state = readState(paths.statePath);
@@ -480,14 +518,6 @@ function formatStats(index) {
   return `<pre>${escapeHtml([border, ...boxLines, border].join("\n"))}</pre>`;
 }
 
-function getWalletBalanceLine(index) {
-  const paths = getPathsForIndex(index);
-  const lines = readLogLines(paths.logPath);
-  const metrics = findLatestMetrics(lines);
-  const sol = metrics?.solBal ? formatSol(metrics.solBal) : "--";
-  return sol;
-}
-
 function appendCommand(action) {
   const payload = {
     ts: new Date().toISOString(),
@@ -506,7 +536,43 @@ function queueCommand(message) {
   return `<b>Queued</b>: ${escapeHtml(message)}`;
 }
 
-async function sendMessage(text) {
+function buildKeyboard(type) {
+  if (type === "wallet") {
+    return {
+      inline_keyboard: [
+        [
+          { text: "Prev", callback_data: "wallet_prev" },
+          { text: "Select", callback_data: "wallet_select" },
+          { text: "Next", callback_data: "wallet_next" },
+        ],
+        [
+          { text: "Status", callback_data: "status_card" },
+          { text: "Lab", callback_data: "lab_status" },
+          { text: "Stats", callback_data: "stats_status" },
+        ],
+      ],
+    };
+  }
+  return {
+    inline_keyboard: [
+      [
+        { text: "Start bot", callback_data: "bot_start" },
+        { text: "Stop bot", callback_data: "bot_stop" },
+      ],
+      [
+        { text: "Force sell", callback_data: "bot_force_sell" },
+        { text: "Force buy", callback_data: "bot_force_buy" },
+      ],
+      [
+        { text: "Lab", callback_data: "lab_status" },
+        { text: "Stats", callback_data: "stats_status" },
+      ],
+      [{ text: "Wallets", callback_data: "wallet_status" }],
+    ],
+  };
+}
+
+async function sendMessage(text, keyboardType = "status") {
   const res = await fetch(`${API_BASE}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -514,30 +580,7 @@ async function sendMessage(text) {
       chat_id: CHAT_ID,
       text,
       parse_mode: "HTML",
-      reply_markup: {
-        inline_keyboard: [
-          [
-            { text: "Start bot", callback_data: "bot_start" },
-            { text: "Stop bot", callback_data: "bot_stop" },
-          ],
-          [
-            { text: "Force sell", callback_data: "bot_force_sell" },
-            { text: "Force buy", callback_data: "bot_force_buy" },
-          ],
-          [
-            { text: "Lab", callback_data: "lab_status" },
-            { text: "Stats", callback_data: "stats_status" },
-          ],
-          [
-            { text: "Wallet Prev", callback_data: "wallet_prev" },
-            { text: "Wallet Next", callback_data: "wallet_next" },
-          ],
-          [
-            { text: "Wallet", callback_data: "wallet_status" },
-            { text: "Select", callback_data: "wallet_select" },
-          ],
-        ],
-      },
+      reply_markup: buildKeyboard(keyboardType),
     }),
   });
   if (!res.ok) {
@@ -580,14 +623,38 @@ async function deleteMessage(chatId, messageId) {
   }
 }
 
-async function sendPanel(chatId, key, text) {
-  const prevId = lastPanelMessageIds[key];
-  if (prevId) {
-    await deleteMessage(chatId, prevId).catch(() => {});
+async function editMessage(chatId, messageId, text, keyboardType) {
+  const res = await fetch(`${API_BASE}/editMessageText`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      message_id: messageId,
+      text,
+      parse_mode: "HTML",
+      reply_markup: buildKeyboard(keyboardType),
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`editMessageText failed: ${res.status} ${body}`);
   }
-  const msgId = await sendMessage(text);
+}
+
+async function sendOrEditPanel(chatId, text, type) {
+  lastPanelType = type;
+  if (lastPanelMessageId && lastPanelChatId === chatId) {
+    try {
+      await editMessage(chatId, lastPanelMessageId, text, type);
+      return lastPanelMessageId;
+    } catch {
+      // fall back to sending new
+    }
+  }
+  const msgId = await sendMessage(text, type);
   if (msgId) {
-    lastPanelMessageIds[key] = msgId;
+    lastPanelMessageId = msgId;
+    lastPanelChatId = chatId;
   }
   return msgId;
 }
@@ -675,40 +742,41 @@ async function pollLoop() {
             walletViewIndex = 0;
           }
         }
-        if (message.startsWith("/status")) {
-          await sendPanel(chatId, "status", formatStatus(walletViewIndex));
+        if (message.startsWith("/start") || message.startsWith("/status")) {
+          await sendOrEditPanel(chatId, formatStatus(walletViewIndex), "status");
           if (update.message?.message_id) {
             deleteMessage(chatId, update.message.message_id).catch(() => {});
           }
         } else if (message.startsWith("/lab")) {
-          await sendPanel(chatId, "lab", formatLab(walletViewIndex));
+          await sendOrEditPanel(chatId, formatLab(walletViewIndex), "lab");
           if (update.message?.message_id) {
             deleteMessage(chatId, update.message.message_id).catch(() => {});
           }
         } else if (message.startsWith("/stats")) {
-          await sendPanel(chatId, "stats", formatStats(walletViewIndex));
+          await sendOrEditPanel(chatId, formatStats(walletViewIndex), "stats");
+          if (update.message?.message_id) {
+            deleteMessage(chatId, update.message.message_id).catch(() => {});
+          }
+        } else if (/^\/(wallets|wallet)\b/i.test(message)) {
+          await sendOrEditPanel(
+            chatId,
+            formatWalletCard(walletViewIndex),
+            "wallet"
+          );
           if (update.message?.message_id) {
             deleteMessage(chatId, update.message.message_id).catch(() => {});
           }
         } else if (/^\/(minTP|walletUSE|setDEGEN|buyDUMP|stepSIZE|step|setCA)\b/i.test(message)) {
           const cleaned = message.replace(/^\//, "");
-          const msgId = await sendMessage(queueCommand(cleaned));
-          if (msgId) {
-            setTimeout(() => {
-              deleteMessage(chatId, msgId).catch(() => {});
-            }, 4000);
-          }
+          appendCommand(cleaned);
+          await sendOrEditPanel(chatId, formatStatus(walletViewIndex), "status");
           if (update.message?.message_id) {
             deleteMessage(chatId, update.message.message_id).catch(() => {});
           }
         } else if (/^\/(forcebuy|forcesell)\b/i.test(message)) {
           const cleaned = message.replace(/^\//, "");
-          const msgId = await sendMessage(queueCommand(cleaned));
-          if (msgId) {
-            setTimeout(() => {
-              deleteMessage(chatId, msgId).catch(() => {});
-            }, 4000);
-          }
+          appendCommand(cleaned);
+          await sendOrEditPanel(chatId, formatStatus(walletViewIndex), "status");
           if (update.message?.message_id) {
             deleteMessage(chatId, update.message.message_id).catch(() => {});
           }
@@ -744,11 +812,26 @@ async function pollLoop() {
         const action = callback.data;
         if (action) {
           if (action === "lab_status") {
-            await sendPanel(callbackChatId, "lab", formatLab(walletViewIndex));
+            await sendOrEditPanel(
+              callbackChatId,
+              formatLab(walletViewIndex),
+              "lab"
+            );
             await answerCallbackQuery(callback.id, "Lab");
           } else if (action === "stats_status") {
-            await sendPanel(callbackChatId, "stats", formatStats(walletViewIndex));
+            await sendOrEditPanel(
+              callbackChatId,
+              formatStats(walletViewIndex),
+              "stats"
+            );
             await answerCallbackQuery(callback.id, "Stats");
+          } else if (action === "status_card") {
+            await sendOrEditPanel(
+              callbackChatId,
+              formatStatus(walletViewIndex),
+              "status"
+            );
+            await answerCallbackQuery(callback.id, "Status");
           } else if (action === "wallet_prev") {
             const wallets = readWallets();
             if (!wallets.length) {
@@ -759,7 +842,11 @@ async function pollLoop() {
               walletViewIndex === null
                 ? 0
                 : (walletViewIndex - 1 + wallets.length) % wallets.length;
-            await sendPanel(callbackChatId, "wallet", formatStatus(walletViewIndex));
+            await sendOrEditPanel(
+              callbackChatId,
+              formatWalletCard(walletViewIndex),
+              "wallet"
+            );
             await answerCallbackQuery(callback.id, `Wallet ${walletViewIndex}`);
           } else if (action === "wallet_next") {
             const wallets = readWallets();
@@ -771,10 +858,18 @@ async function pollLoop() {
               walletViewIndex === null
                 ? 0
                 : (walletViewIndex + 1) % wallets.length;
-            await sendPanel(callbackChatId, "wallet", formatStatus(walletViewIndex));
+            await sendOrEditPanel(
+              callbackChatId,
+              formatWalletCard(walletViewIndex),
+              "wallet"
+            );
             await answerCallbackQuery(callback.id, `Wallet ${walletViewIndex}`);
           } else if (action === "wallet_status") {
-            await sendPanel(callbackChatId, "wallet", formatStatus(walletViewIndex));
+            await sendOrEditPanel(
+              callbackChatId,
+              formatWalletCard(walletViewIndex),
+              "wallet"
+            );
             await answerCallbackQuery(callback.id, "Wallet");
           } else if (action === "wallet_select") {
             if (walletViewIndex === null) {
@@ -782,8 +877,44 @@ async function pollLoop() {
               continue;
             }
             appendCommand(`wallet_select ${walletViewIndex}`);
-            await sendPanel(callbackChatId, "wallet", formatStatus(walletViewIndex));
+            await sendOrEditPanel(
+              callbackChatId,
+              formatWalletCard(walletViewIndex),
+              "wallet"
+            );
             await answerCallbackQuery(callback.id, `Select wallet ${walletViewIndex}`);
+          } else if (action === "bot_start") {
+            appendCommand("bot_start");
+            await sendOrEditPanel(
+              callbackChatId,
+              formatStatus(walletViewIndex),
+              "status"
+            );
+            await answerCallbackQuery(callback.id, "Start");
+          } else if (action === "bot_stop") {
+            appendCommand("bot_stop");
+            await sendOrEditPanel(
+              callbackChatId,
+              formatStatus(walletViewIndex),
+              "status"
+            );
+            await answerCallbackQuery(callback.id, "Stop");
+          } else if (action === "bot_force_buy") {
+            appendCommand("forcebuy");
+            await sendOrEditPanel(
+              callbackChatId,
+              formatStatus(walletViewIndex),
+              "status"
+            );
+            await answerCallbackQuery(callback.id, "Force buy");
+          } else if (action === "bot_force_sell") {
+            appendCommand("forcesell");
+            await sendOrEditPanel(
+              callbackChatId,
+              formatStatus(walletViewIndex),
+              "status"
+            );
+            await answerCallbackQuery(callback.id, "Force sell");
           } else {
             appendCommand(action);
             await answerCallbackQuery(callback.id, `Queued: ${action}`);
@@ -798,7 +929,7 @@ async function pollLoop() {
   }
 }
 
-console.log("Telegram bot running. Commands: /status /lab /stats");
+console.log("Telegram bot running. Commands: /start /status /lab /stats /wallets");
 readAlertConfig();
 setInterval(() => {
   checkMoveAlert().catch((err) => {
