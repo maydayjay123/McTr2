@@ -41,6 +41,15 @@ const DEFAULT_SELL_CHUNKS = 2;
 const DEFAULT_VOL_USE_PCT = 90;
 const DEFAULT_BUY_DELAY_MS = 1000;
 const DEFAULT_SLIPPAGE_BPS = 100;
+const DEFAULT_MM_ACTION_MS = 30000;
+const DEFAULT_MM_TRADE_PCT = 10;
+const DEFAULT_MM_MAX_TRADE_SOL = 0.02;
+const DEFAULT_MM_MIN_TRADE_SOL = 0.002;
+const DEFAULT_MM_PING_PCT = 0.6;
+const DEFAULT_MM_DRIFT_PCT = 0.3;
+const DEFAULT_MM_RANGE_PCT = 0.8;
+const DEFAULT_MM_SELL_PCT = 25;
+const PRICE_QUOTE_LAMPORTS = 5_000_000n;
 const SWEEP_MAX_RETRIES = 3;
 const SWEEP_RETRY_DELAY_MS = 2000;
 const SWEEP_KEEP_LAMPORTS = 5000n;
@@ -230,10 +239,29 @@ function ensureState() {
       stats: {
         buys: 0,
         sells: 0,
+        mmBuys: 0,
+        mmSells: 0,
+        mmVolumeSol: 0,
         volumeSol: 0,
         lastSweepTs: null,
       },
       cycles: {},
+      mmCycles: {},
+      mmStrategy: {
+        actionMs: DEFAULT_MM_ACTION_MS,
+        tradePct: DEFAULT_MM_TRADE_PCT,
+        maxTradeSol: DEFAULT_MM_MAX_TRADE_SOL,
+        minTradeSol: DEFAULT_MM_MIN_TRADE_SOL,
+        pingPct: DEFAULT_MM_PING_PCT,
+        driftPct: DEFAULT_MM_DRIFT_PCT,
+        rangePct: DEFAULT_MM_RANGE_PCT,
+        sellPct: DEFAULT_MM_SELL_PCT,
+      },
+      mmPrice: {
+        ema: null,
+        last: null,
+        ts: null,
+      },
       targetMint: VOL_TARGET_MINT || "",
     };
     writeState(state);
@@ -241,7 +269,31 @@ function ensureState() {
   if (!state.targetMint) {
     state.targetMint = VOL_TARGET_MINT || "";
   }
+  if (!state.stats) {
+    state.stats = { buys: 0, sells: 0, volumeSol: 0, lastSweepTs: null };
+  }
+  if (state.stats.mmBuys === undefined) state.stats.mmBuys = 0;
+  if (state.stats.mmSells === undefined) state.stats.mmSells = 0;
+  if (state.stats.mmVolumeSol === undefined) state.stats.mmVolumeSol = 0;
   if (!state.cycles) state.cycles = {};
+  if (!state.mmCycles) state.mmCycles = {};
+  if (!state.mmStrategy) {
+    state.mmStrategy = {
+      actionMs: DEFAULT_MM_ACTION_MS,
+      tradePct: DEFAULT_MM_TRADE_PCT,
+      maxTradeSol: DEFAULT_MM_MAX_TRADE_SOL,
+      minTradeSol: DEFAULT_MM_MIN_TRADE_SOL,
+      pingPct: DEFAULT_MM_PING_PCT,
+      driftPct: DEFAULT_MM_DRIFT_PCT,
+      rangePct: DEFAULT_MM_RANGE_PCT,
+      sellPct: DEFAULT_MM_SELL_PCT,
+    };
+  }
+  if (!state.mmPrice) {
+    state.mmPrice = { ema: null, last: null, ts: null };
+  } else if (state.mmPrice.ts === undefined) {
+    state.mmPrice.ts = null;
+  }
   return state;
 }
 
@@ -254,6 +306,17 @@ function getCycle(state, pubkey) {
     };
   }
   return state.cycles[pubkey];
+}
+
+function getMmCycle(state, pubkey) {
+  if (!state.mmCycles) state.mmCycles = {};
+  if (!state.mmCycles[pubkey]) {
+    state.mmCycles[pubkey] = {
+      lastActionTs: 0,
+      lastTradePrice: null,
+    };
+  }
+  return state.mmCycles[pubkey];
 }
 
 function shouldWait(cycle, delayMs) {
@@ -301,6 +364,25 @@ async function fetchQuote(inputMint, outputMint, amount, slippageBps) {
     throw new Error("Quote returned no outAmount");
   }
   return data;
+}
+
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
+async function getMidPrice(connection, mint) {
+  const quote = await fetchQuote(
+    SOL_MINT,
+    mint,
+    PRICE_QUOTE_LAMPORTS,
+    DEFAULT_SLIPPAGE_BPS
+  );
+  const outAmount = Number(quote.outAmount || 0);
+  if (!outAmount) {
+    throw new Error("Price quote returned zero outAmount");
+  }
+  const price = Number(PRICE_QUOTE_LAMPORTS) / outAmount;
+  return price;
 }
 
 async function fetchSwapTransaction(quote, userPublicKey) {
@@ -429,6 +511,16 @@ async function main() {
     volWallets: state.volWalletCount,
     mmWallets: state.mmWalletCount,
     split: `${state.volSplitPct}/${100 - state.volSplitPct}`,
+  });
+  logInfo("MM config", {
+    actionMs: state.mmStrategy.actionMs,
+    tradePct: state.mmStrategy.tradePct,
+    maxTradeSol: state.mmStrategy.maxTradeSol,
+    minTradeSol: state.mmStrategy.minTradeSol,
+    pingPct: state.mmStrategy.pingPct,
+    driftPct: state.mmStrategy.driftPct,
+    rangePct: state.mmStrategy.rangePct,
+    sellPct: state.mmStrategy.sellPct,
   });
 
   while (true) {
@@ -718,6 +810,156 @@ async function main() {
         cycle.buyCount += 1;
         cycle.lastActionTs = Date.now();
         writeState(state);
+      }
+
+      const mmWallets = wallets.mmWallets.slice(0, state.mmWalletCount);
+      if (mmWallets.length) {
+        let price = null;
+        try {
+          const now = Date.now();
+          const refreshMs = Math.min(state.mmStrategy.actionMs, 20000);
+          if (!state.mmPrice.ts || now - state.mmPrice.ts > refreshMs) {
+            price = await getMidPrice(connection, state.targetMint);
+            const alpha = 0.2;
+            if (state.mmPrice.ema === null) {
+              state.mmPrice.ema = price;
+            } else {
+              state.mmPrice.ema =
+                state.mmPrice.ema * (1 - alpha) + price * alpha;
+            }
+            state.mmPrice.last = price;
+            state.mmPrice.ts = now;
+            writeState(state);
+          } else {
+            price = state.mmPrice.last;
+          }
+        } catch (err) {
+          logWarn("MM price unavailable", { error: err.message || err });
+        }
+
+        if (price !== null && state.mmPrice.ema) {
+          const ema = state.mmPrice.ema;
+          const pingPct = state.mmStrategy.pingPct;
+          const driftPct = state.mmStrategy.driftPct;
+          const rangePct = state.mmStrategy.rangePct;
+          const tradePct = state.mmStrategy.tradePct;
+          const maxTradeSol = state.mmStrategy.maxTradeSol;
+          const minTradeSol = state.mmStrategy.minTradeSol;
+          const sellPct = state.mmStrategy.sellPct;
+          for (const wallet of mmWallets) {
+            const keypair = Keypair.fromSecretKey(
+              Uint8Array.from(wallet.secretKey)
+            );
+            const cycle = getMmCycle(state, wallet.publicKey);
+            if (Date.now() - cycle.lastActionTs < state.mmStrategy.actionMs) {
+              continue;
+            }
+            const solBal = BigInt(
+              await connection.getBalance(keypair.publicKey, "confirmed")
+            );
+            const reserve = lamportsFromSol(state.reserveSol);
+            const tokenBal = await getTokenBalance(
+              connection,
+              keypair.publicKey,
+              mintPubkey
+            );
+
+            const deltaPct = ((price - ema) / ema) * 100;
+            if (cycle.lastTradePrice === null) {
+              cycle.lastTradePrice = price;
+            }
+            const rangeUp =
+              price >= cycle.lastTradePrice * (1 + rangePct / 100);
+            const rangeDown =
+              price <= cycle.lastTradePrice * (1 - rangePct / 100);
+            const pingBuy = deltaPct <= -pingPct;
+            const pingSell = deltaPct >= pingPct;
+            const driftBuy = price < ema * (1 - driftPct / 100);
+            const driftSell = price > ema * (1 + driftPct / 100);
+
+            const sellSignal =
+              (pingSell || driftSell || rangeUp) && tokenBal.amount > 0n;
+            const buySignal = pingBuy || driftBuy || rangeDown;
+
+            if (sellSignal) {
+              const amount = (tokenBal.amount * BigInt(sellPct)) / 100n;
+              if (amount > BALANCE_THRESHOLD_LAMPORTS) {
+                const quote = await fetchQuote(
+                  state.targetMint,
+                  SOL_MINT,
+                  amount,
+                  state.slippageBps
+                );
+                logData("quote", {
+                  type: "mm_sell",
+                  wallet: wallet.publicKey,
+                  inAmount: amount.toString(),
+                  outAmount: quote.outAmount,
+                });
+                const sig = await executeSwap(connection, keypair, quote);
+                state.stats.mmSells += 1;
+                logInfo("MM sell", {
+                  wallet: wallet.publicKey,
+                  sig,
+                  reason: [
+                    pingSell ? "ping" : null,
+                    driftSell ? "drift" : null,
+                    rangeUp ? "range" : null,
+                  ]
+                    .filter(Boolean)
+                    .join(","),
+                });
+                cycle.lastTradePrice = price;
+                cycle.lastActionTs = Date.now();
+                writeState(state);
+              }
+              continue;
+            }
+
+            if (buySignal) {
+              if (solBal <= reserve + BALANCE_THRESHOLD_LAMPORTS) {
+                continue;
+              }
+              const spendable = solBal - reserve;
+              let tradeSol =
+                (Number(spendable) / 1e9) * (tradePct / 100);
+              tradeSol = clamp(tradeSol, minTradeSol, maxTradeSol);
+              const tradeLamports = lamportsFromSol(tradeSol);
+              if (tradeLamports <= BALANCE_THRESHOLD_LAMPORTS) {
+                continue;
+              }
+              const quote = await fetchQuote(
+                SOL_MINT,
+                state.targetMint,
+                tradeLamports,
+                state.slippageBps
+              );
+              logData("quote", {
+                type: "mm_buy",
+                wallet: wallet.publicKey,
+                inAmount: tradeLamports.toString(),
+                outAmount: quote.outAmount,
+              });
+              const sig = await executeSwap(connection, keypair, quote);
+              state.stats.mmBuys += 1;
+              state.stats.mmVolumeSol += Number(tradeLamports) / 1e9;
+              logInfo("MM buy", {
+                wallet: wallet.publicKey,
+                sig,
+                reason: [
+                  pingBuy ? "ping" : null,
+                  driftBuy ? "drift" : null,
+                  rangeDown ? "range" : null,
+                ]
+                  .filter(Boolean)
+                  .join(","),
+              });
+              cycle.lastTradePrice = price;
+              cycle.lastActionTs = Date.now();
+              writeState(state);
+            }
+          }
+        }
       }
     } catch (err) {
       logError("Loop error", { error: err.message || err });
