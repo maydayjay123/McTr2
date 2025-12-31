@@ -247,6 +247,7 @@ function ensureState() {
       },
       cycles: {},
       mmCycles: {},
+      wipeSubs: false,
       mmStrategy: {
         actionMs: DEFAULT_MM_ACTION_MS,
         tradePct: DEFAULT_MM_TRADE_PCT,
@@ -293,6 +294,9 @@ function ensureState() {
     state.mmPrice = { ema: null, last: null, ts: null };
   } else if (state.mmPrice.ts === undefined) {
     state.mmPrice.ts = null;
+  }
+  if (state.wipeSubs === undefined) {
+    state.wipeSubs = false;
   }
   return state;
 }
@@ -549,7 +553,7 @@ async function main() {
             }
           } else if (cmd.name === "vol_set_mm") {
             const count = Number(cmd.args[0]);
-            if (Number.isFinite(count) && count > 0) {
+            if (Number.isFinite(count) && count >= 0) {
               state.mmWalletCount = Math.floor(count);
               walletConfigChanged = true;
               logInfo("CMD vol_set_mm", { count: state.mmWalletCount });
@@ -563,6 +567,9 @@ async function main() {
           } else if (cmd.name === "vol_sweep") {
             state.sweep = true;
             logInfo("CMD vol_sweep");
+          } else if (cmd.name === "vol_wipe_subs") {
+            state.wipeSubs = true;
+            logInfo("CMD vol_wipe_subs");
           }
         }
         state.lastCommandLine = commandRead.nextIndex;
@@ -667,6 +674,76 @@ async function main() {
         continue;
       }
 
+      if (state.wipeSubs) {
+        const volWallets = wallets.volWallets.slice(0, state.volWalletCount);
+        const mmWallets = wallets.mmWallets.slice(0, state.mmWalletCount);
+        const subWallets = volWallets.concat(mmWallets);
+        if (state.running) {
+          logWarn("Wipe blocked: bot running");
+          state.wipeSubs = false;
+          writeState(state);
+          await new Promise((resolve) => setTimeout(resolve, pollMs));
+          continue;
+        }
+        if (!state.stats?.lastSweepTs) {
+          logWarn("Wipe blocked: no sweep recorded");
+          state.wipeSubs = false;
+          writeState(state);
+          await new Promise((resolve) => setTimeout(resolve, pollMs));
+          continue;
+        }
+        let wipeOk = true;
+        for (const wallet of subWallets) {
+          const keypair = Keypair.fromSecretKey(
+            Uint8Array.from(wallet.secretKey)
+          );
+          const tokenBal = await getTokenBalance(
+            connection,
+            keypair.publicKey,
+            mintPubkey
+          );
+          if (tokenBal.amount > 0n) {
+            wipeOk = false;
+            logWarn("Wipe blocked: tokens remain", {
+              wallet: wallet.publicKey,
+              remaining: tokenBal.amount.toString(),
+            });
+            break;
+          }
+        }
+        if (wipeOk) {
+          const data = loadWalletFile();
+          data.volWallets = [];
+          data.mmWallets = [];
+          while (data.volWallets.length < state.volWalletCount) {
+            const kp = Keypair.generate();
+            data.volWallets.push({
+              publicKey: kp.publicKey.toBase58(),
+              secretKey: Array.from(kp.secretKey),
+            });
+          }
+          while (data.mmWallets.length < state.mmWalletCount) {
+            const kp = Keypair.generate();
+            data.mmWallets.push({
+              publicKey: kp.publicKey.toBase58(),
+              secretKey: Array.from(kp.secretKey),
+            });
+          }
+          saveWalletFile(data);
+          wallets = data;
+          state.cycles = {};
+          state.mmCycles = {};
+          logInfo("Wipe complete: new sub wallets generated", {
+            volWallets: data.volWallets.length,
+            mmWallets: data.mmWallets.length,
+          });
+        }
+        state.wipeSubs = false;
+        writeState(state);
+        await new Promise((resolve) => setTimeout(resolve, pollMs));
+        continue;
+      }
+
       const reserveLamports = lamportsFromSol(state.reserveSol);
       const availableParent =
         parentBalance > reserveLamports ? parentBalance - reserveLamports : 0n;
@@ -676,8 +753,8 @@ async function main() {
       } else if (Date.now() - state.lastDistributionTs > 60000) {
         const volCount = state.volWalletCount;
         const mmCount = state.mmWalletCount;
-        const volPct = state.volSplitPct;
-        const mmPct = 100 - volPct;
+        const volPct = mmCount === 0 ? 100 : state.volSplitPct;
+        const mmPct = mmCount === 0 ? 0 : 100 - volPct;
         const volTarget = (availableParent * BigInt(volPct)) / 100n;
         const mmTarget = (availableParent * BigInt(mmPct)) / 100n;
 

@@ -495,9 +495,12 @@ function formatVolPanel() {
   const running = state?.running ? "ON" : "OFF";
   const volCount = state?.volWalletCount ?? "--";
   const mmCount = state?.mmWalletCount ?? "--";
-  const split = state?.volSplitPct !== undefined
-    ? `${state.volSplitPct}% / ${100 - state.volSplitPct}%`
-    : "--";
+  const split =
+    state?.volSplitPct !== undefined
+      ? mmCount === 0
+        ? "100% / 0%"
+        : `${state.volSplitPct}% / ${100 - state.volSplitPct}%`
+      : "--";
   const reserve = state?.reserveSol !== undefined ? `${state.reserveSol}` : "--";
   const targetMint = state?.targetMint || "--";
   const parentSol = state?.lastParentBalanceLamports
@@ -530,6 +533,7 @@ function formatVolPanel() {
     "Set vol: /setvol 2",
     "Set mm: /setmm 1",
     "Set reserve: /setreserve 0.02",
+    "Wipe sub wallets: /volwipe",
   ];
   return `${header}\n${body.join("\n")}`;
 }
@@ -686,6 +690,9 @@ function buildKeyboard(type) {
         ],
         [
           { text: "Set Reserve", callback_data: "vol_set_reserve" },
+        ],
+        [
+          { text: "Wipe Subs", callback_data: "vol_wipe_subs" },
         ],
         [
           { text: "Back", callback_data: "vol_back" },
@@ -942,6 +949,12 @@ async function pollLoop() {
           if (update.message?.message_id) {
             deleteMessage(chatId, update.message.message_id).catch(() => {});
           }
+        } else if (/^\/volwipe\b/i.test(message)) {
+          appendVolCommand("vol_wipe_subs");
+          await sendOrEditPanel(chatId, formatVolPanel(), "vol");
+          if (update.message?.message_id) {
+            deleteMessage(chatId, update.message.message_id).catch(() => {});
+          }
         } else if (/^\/(minTP|walletUSE|setDEGEN|buyDUMP|stepSIZE|step|setCA)\b/i.test(message)) {
           const cleaned = message.replace(/^\//, "");
           appendCommand(cleaned);
@@ -1135,6 +1148,14 @@ async function pollLoop() {
               "vol"
             );
             await answerCallbackQuery(callback.id, "Use /setreserve <sol>");
+          } else if (action === "vol_wipe_subs") {
+            appendVolCommand("vol_wipe_subs");
+            await sendOrEditPanel(
+              callbackChatId,
+              formatVolPanel(),
+              "vol"
+            );
+            await answerCallbackQuery(callback.id, "Wipe sub wallets");
           } else if (action === "vol_stats") {
             await sendOrEditPanel(
               callbackChatId,
