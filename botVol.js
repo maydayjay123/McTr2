@@ -473,6 +473,62 @@ async function main() {
         await connection.getBalance(parentKeypair.publicKey, "confirmed")
       );
       state.lastParentBalanceLamports = parentBalance.toString();
+      writeState(state);
+
+      if (state.sweep) {
+        logInfo("SWEEP start");
+        const volWallets = wallets.volWallets.slice(0, state.volWalletCount);
+        for (const wallet of volWallets) {
+          const keypair = Keypair.fromSecretKey(
+            Uint8Array.from(wallet.secretKey)
+          );
+          const tokenBal = await getTokenBalance(
+            connection,
+            keypair.publicKey,
+            mintPubkey
+          );
+          if (tokenBal.amount > 0n) {
+            const quote = await fetchQuote(
+              state.targetMint,
+              SOL_MINT,
+              tokenBal.amount,
+              state.slippageBps
+            );
+            logData("quote", {
+              type: "sell",
+              wallet: wallet.publicKey,
+              inAmount: tokenBal.amount.toString(),
+              outAmount: quote.outAmount,
+            });
+            const sig = await executeSwap(connection, keypair, quote);
+            logInfo("Sweep sell", { wallet: wallet.publicKey, sig });
+          }
+          const solBal = BigInt(
+            await connection.getBalance(keypair.publicKey, "confirmed")
+          );
+          const reserve = lamportsFromSol(state.reserveSol);
+          if (solBal > reserve + BALANCE_THRESHOLD_LAMPORTS) {
+            const delta = solBal - reserve;
+            const sig = await transferSol(
+              connection,
+              keypair,
+              parentKeypair.publicKey,
+              delta
+            );
+            logInfo("Sweep sol", {
+              wallet: wallet.publicKey,
+              sol: formatSol(delta),
+              sig,
+            });
+          }
+        }
+        state.stats.lastSweepTs = new Date().toISOString();
+        state.sweep = false;
+        writeState(state);
+        logInfo("SWEEP complete");
+        await new Promise((resolve) => setTimeout(resolve, pollMs));
+        continue;
+      }
 
       const reserveLamports = lamportsFromSol(state.reserveSol);
       const availableParent =
@@ -536,48 +592,7 @@ async function main() {
         writeState(state);
       }
 
-      if (state.sweep) {
-        const volWallets = wallets.volWallets.slice(0, state.volWalletCount);
-        for (const wallet of volWallets) {
-          const keypair = Keypair.fromSecretKey(
-            Uint8Array.from(wallet.secretKey)
-          );
-          const tokenBal = await getTokenBalance(connection, keypair.publicKey, mintPubkey);
-          if (tokenBal.amount > 0n) {
-            const quote = await fetchQuote(
-              state.targetMint,
-              SOL_MINT,
-              tokenBal.amount,
-              state.slippageBps
-            );
-            logData("quote", {
-              type: "sell",
-              wallet: wallet.publicKey,
-              inAmount: tokenBal.amount.toString(),
-              outAmount: quote.outAmount,
-            });
-            const sig = await executeSwap(connection, keypair, quote);
-            logInfo("Sweep sell", { wallet: wallet.publicKey, sig });
-          }
-          const solBal = BigInt(
-            await connection.getBalance(keypair.publicKey, "confirmed")
-          );
-          const reserve = lamportsFromSol(state.reserveSol);
-          if (solBal > reserve + BALANCE_THRESHOLD_LAMPORTS) {
-            const delta = solBal - reserve;
-            const sig = await transferSol(
-              connection,
-              keypair,
-              parentKeypair.publicKey,
-              delta
-            );
-            logInfo("Sweep sol", { wallet: wallet.publicKey, sol: formatSol(delta), sig });
-          }
-        }
-        state.stats.lastSweepTs = new Date().toISOString();
-        state.sweep = false;
-        writeState(state);
-      }
+ 
 
       const volWallets = wallets.volWallets.slice(0, state.volWalletCount);
       for (const wallet of volWallets) {
