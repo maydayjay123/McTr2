@@ -13,6 +13,14 @@ const LOG_PATH =
   path.join(__dirname, "botv3.log");
 const COMMANDS_PATH =
   process.env.TG_COMMANDS_PATH || path.join(__dirname, "tg_commands.jsonl");
+const VOL_COMMANDS_PATH =
+  process.env.VOL_COMMANDS_PATH || path.join(__dirname, "vol_commands.jsonl");
+const VOL_STATE_PATH =
+  process.env.VOL_STATE_PATH || path.join(__dirname, "botvol_state.json");
+const VOL_LOG_PATH =
+  process.env.VOL_LOG_PATH || path.join(__dirname, "botvol.log");
+const VOL_WALLETS_FILE =
+  process.env.VOL_WALLETS_FILE || path.join(__dirname, "vol_wallets.json");
 const WALLETS_FILE =
   process.env.WALLETS_FILE || path.join(__dirname, "wallets.json");
 const STATE_TEMPLATE =
@@ -104,6 +112,28 @@ function readWallets() {
     return Array.isArray(data.wallets) ? data.wallets : [];
   } catch {
     return [];
+  }
+}
+
+function readVolWallets() {
+  try {
+    if (!fs.existsSync(VOL_WALLETS_FILE)) return null;
+    const raw = fs.readFileSync(VOL_WALLETS_FILE, "utf8");
+    if (!raw.trim()) return null;
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function readVolState() {
+  try {
+    if (!fs.existsSync(VOL_STATE_PATH)) return null;
+    const raw = fs.readFileSync(VOL_STATE_PATH, "utf8");
+    if (!raw.trim()) return null;
+    return JSON.parse(raw);
+  } catch {
+    return null;
   }
 }
 
@@ -458,6 +488,51 @@ function formatWalletCard(index) {
   return `${header}\n${body.join("\n")}`;
 }
 
+function formatVolPanel() {
+  const state = readVolState();
+  const wallets = readVolWallets();
+  const parent = wallets?.parent?.publicKey || "--";
+  const running = state?.running ? "ON" : "OFF";
+  const volCount = state?.volWalletCount ?? "--";
+  const mmCount = state?.mmWalletCount ?? "--";
+  const split = state?.volSplitPct !== undefined
+    ? `${state.volSplitPct}% / ${100 - state.volSplitPct}%`
+    : "--";
+  const reserve = state?.reserveSol !== undefined ? `${state.reserveSol}` : "--";
+  const targetMint = state?.targetMint || "--";
+  const parentSol = state?.lastParentBalanceLamports
+    ? (Number(state.lastParentBalanceLamports) / 1e9).toFixed(6)
+    : "--";
+  const buys = state?.stats?.buys ?? 0;
+  const sells = state?.stats?.sells ?? 0;
+  const volSol = state?.stats?.volumeSol ?? 0;
+
+  const header = "<b>Vol Bot</b>";
+  const body = [
+    `Status: <b>${running}</b>`,
+    `Parent: <code>${escapeHtml(parent)}</code>`,
+    `Parent SOL: <b>${parentSol}</b>`,
+    "",
+    "<b>Allocation</b>",
+    `Vol wallets: <b>${volCount}</b>`,
+    `MM wallets: <b>${mmCount}</b>`,
+    `Split (vol/mm): <b>${split}</b>`,
+    `Reserve SOL: <b>${reserve}</b>`,
+    "",
+    "<b>Target</b>",
+    `Mint: <code>${escapeHtml(targetMint)}</code>`,
+    "",
+    "<b>Stats</b>",
+    `Buys: <b>${buys}</b>`,
+    `Sells: <b>${sells}</b>`,
+    `Volume SOL: <b>${Number(volSol).toFixed(4)}</b>`,
+    "",
+    "Set vol: /setvol 2",
+    "Set mm: /setmm 1",
+  ];
+  return `${header}\n${body.join("\n")}`;
+}
+
 function formatLab(index) {
   const paths = getPathsForIndex(index);
   const state = readState(paths.statePath);
@@ -559,6 +634,18 @@ function appendCommand(action) {
   }
 }
 
+function appendVolCommand(action) {
+  const payload = {
+    ts: new Date().toISOString(),
+    action,
+  };
+  try {
+    fs.appendFileSync(VOL_COMMANDS_PATH, `${JSON.stringify(payload)}\n`, "utf8");
+  } catch (err) {
+    console.error("Failed to write vol command:", err.message || err);
+  }
+}
+
 function queueCommand(message) {
   appendCommand(message);
   return `<b>Queued</b>: ${escapeHtml(message)}`;
@@ -581,6 +668,27 @@ function buildKeyboard(type) {
       ],
     };
   }
+  if (type === "vol") {
+    return {
+      inline_keyboard: [
+        [
+          { text: "Start", callback_data: "vol_start" },
+          { text: "Stop", callback_data: "vol_stop" },
+        ],
+        [
+          { text: "Set Vol", callback_data: "vol_set_vol" },
+          { text: "Set MM", callback_data: "vol_set_mm" },
+        ],
+        [
+          { text: "Stats", callback_data: "vol_stats" },
+          { text: "Sweep", callback_data: "vol_sweep" },
+        ],
+        [
+          { text: "Back", callback_data: "vol_back" },
+        ],
+      ],
+    };
+  }
   return {
     inline_keyboard: [
       [
@@ -595,7 +703,11 @@ function buildKeyboard(type) {
         { text: "Lab", callback_data: "lab_status" },
         { text: "Stats", callback_data: "stats_status" },
       ],
-      [{ text: "Wallets", callback_data: "wallet_status" }],
+      [
+        { text: "Status", callback_data: "status_card" },
+        { text: "Vol Bot", callback_data: "vol_menu" },
+      ],
+      [{ text: "Wallet", callback_data: "wallet_status" }],
     ],
   };
 }
@@ -785,12 +897,35 @@ async function pollLoop() {
           if (update.message?.message_id) {
             deleteMessage(chatId, update.message.message_id).catch(() => {});
           }
+        } else if (message.startsWith("/volbot")) {
+          await sendOrEditPanel(chatId, formatVolPanel(), "vol");
+          if (update.message?.message_id) {
+            deleteMessage(chatId, update.message.message_id).catch(() => {});
+          }
         } else if (/^\/(wallets|wallet)\b/i.test(message)) {
           await sendOrEditPanel(
             chatId,
             formatWalletCard(walletViewIndex),
             "wallet"
           );
+          if (update.message?.message_id) {
+            deleteMessage(chatId, update.message.message_id).catch(() => {});
+          }
+        } else if (/^\/setvol\b/i.test(message)) {
+          const parts = message.trim().split(/\s+/);
+          if (parts[1]) {
+            appendVolCommand(`vol_set_vol ${parts[1]}`);
+          }
+          await sendOrEditPanel(chatId, formatVolPanel(), "vol");
+          if (update.message?.message_id) {
+            deleteMessage(chatId, update.message.message_id).catch(() => {});
+          }
+        } else if (/^\/setmm\b/i.test(message)) {
+          const parts = message.trim().split(/\s+/);
+          if (parts[1]) {
+            appendVolCommand(`vol_set_mm ${parts[1]}`);
+          }
+          await sendOrEditPanel(chatId, formatVolPanel(), "vol");
           if (update.message?.message_id) {
             deleteMessage(chatId, update.message.message_id).catch(() => {});
           }
@@ -860,6 +995,13 @@ async function pollLoop() {
               "status"
             );
             await answerCallbackQuery(callback.id, "Status");
+          } else if (action === "vol_menu") {
+            await sendOrEditPanel(
+              callbackChatId,
+              formatVolPanel(),
+              "vol"
+            );
+            await answerCallbackQuery(callback.id, "Vol Bot");
           } else if (action === "wallet_prev") {
             const wallets = readWallets();
             if (!wallets.length) {
@@ -943,6 +1085,58 @@ async function pollLoop() {
               "status"
             );
             await answerCallbackQuery(callback.id, "Force sell");
+          } else if (action === "vol_start") {
+            appendVolCommand("vol_start");
+            await sendOrEditPanel(
+              callbackChatId,
+              formatVolPanel(),
+              "vol"
+            );
+            await answerCallbackQuery(callback.id, "Vol start");
+          } else if (action === "vol_stop") {
+            appendVolCommand("vol_stop");
+            await sendOrEditPanel(
+              callbackChatId,
+              formatVolPanel(),
+              "vol"
+            );
+            await answerCallbackQuery(callback.id, "Vol stop");
+          } else if (action === "vol_set_vol") {
+            await sendOrEditPanel(
+              callbackChatId,
+              formatVolPanel(),
+              "vol"
+            );
+            await answerCallbackQuery(callback.id, "Use /setvol <n>");
+          } else if (action === "vol_set_mm") {
+            await sendOrEditPanel(
+              callbackChatId,
+              formatVolPanel(),
+              "vol"
+            );
+            await answerCallbackQuery(callback.id, "Use /setmm <n>");
+          } else if (action === "vol_stats") {
+            await sendOrEditPanel(
+              callbackChatId,
+              formatVolPanel(),
+              "vol"
+            );
+            await answerCallbackQuery(callback.id, "Vol stats");
+          } else if (action === "vol_sweep") {
+            appendVolCommand("vol_sweep");
+            await sendOrEditPanel(
+              callbackChatId,
+              formatVolPanel(),
+              "vol"
+            );
+            await answerCallbackQuery(callback.id, "Sweep");
+          } else if (action === "vol_back") {
+            await sendOrEditPanel(
+              callbackChatId,
+              formatStatus(walletViewIndex),
+              "status"
+            );
+            await answerCallbackQuery(callback.id, "Back");
           } else {
             appendCommand(action);
             await answerCallbackQuery(callback.id, `Queued: ${action}`);
@@ -957,7 +1151,7 @@ async function pollLoop() {
   }
 }
 
-console.log("Telegram bot running. Commands: /start /status /lab /stats /wallets");
+console.log("Telegram bot running. Commands: /start /status /lab /stats /wallets /volbot");
 readAlertConfig();
 setInterval(() => {
   checkMoveAlert().catch((err) => {
