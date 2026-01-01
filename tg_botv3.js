@@ -50,6 +50,7 @@ let walletViewIndex = null;
 let lastPanelMessageId = null;
 let lastPanelChatId = null;
 let lastPanelType = "status";
+let pendingTrade = null;
 let alertConfig = {
   movePct: DEFAULT_ALERT_MOVE_PCT,
   windowSec: DEFAULT_ALERT_WINDOW_SEC,
@@ -538,6 +539,42 @@ function formatVolPanel() {
   return `${header}\n${body.join("\n")}`;
 }
 
+function formatTradePanel(index) {
+  const paths = getPathsForIndex(index);
+  const state = readState(paths.statePath);
+  const walletPubkey = state?.activeWalletPubkey || "--";
+  const solBal =
+    state?.lastSolBalanceLamports !== null &&
+    state?.lastSolBalanceLamports !== undefined
+      ? lamportsToSol(state.lastSolBalanceLamports)
+      : null;
+  const tokenRaw = state?.totalTokenAmount || "0";
+  const tokenDecimals = state?.tokenDecimals ?? null;
+  const tokenMint = state?.tokenMint || "--";
+
+  const header = "<b>Force Trade</b>";
+  const body = [
+    `Wallet: <code>${escapeHtml(walletPubkey)}</code>`,
+    `SOL available: <b>${solBal !== null ? solBal.toFixed(6) : "--"}</b>`,
+    `Token (${escapeHtml(tokenMint)}): <b>${formatTokenAmount(
+      tokenRaw,
+      tokenDecimals
+    )}</b>`,
+    "",
+    "<b>Commands</b>",
+    "Buy: /buy <sol> [maxPrice]",
+    "Sell: /sell <pct> [minPrice]",
+    "Sell all: /sellall",
+  ];
+  if (pendingTrade) {
+    body.push(
+      "",
+      `<b>Pending</b>: ${pendingTrade.summary}`
+    );
+  }
+  return `${header}\n${body.join("\n")}`;
+}
+
 function formatLab(index) {
   const paths = getPathsForIndex(index);
   const state = readState(paths.statePath);
@@ -700,6 +737,22 @@ function buildKeyboard(type) {
       ],
     };
   }
+  if (type === "trade") {
+    return {
+      inline_keyboard: [
+        [
+          { text: "Buy", callback_data: "trade_buy" },
+          { text: "Sell", callback_data: "trade_sell" },
+        ],
+        [
+          { text: "Sell All", callback_data: "trade_sellall" },
+          { text: "Confirm", callback_data: "trade_confirm" },
+        ],
+        [{ text: "Cancel", callback_data: "trade_cancel" }],
+        [{ text: "Back", callback_data: "trade_back" }],
+      ],
+    };
+  }
   return {
     inline_keyboard: [
       [
@@ -718,6 +771,7 @@ function buildKeyboard(type) {
         { text: "Status", callback_data: "status_card" },
         { text: "Vol Bot", callback_data: "vol_menu" },
       ],
+      [{ text: "Trade", callback_data: "trade_menu" }],
       [{ text: "Wallet", callback_data: "wallet_status" }],
     ],
   };
@@ -913,12 +967,60 @@ async function pollLoop() {
           if (update.message?.message_id) {
             deleteMessage(chatId, update.message.message_id).catch(() => {});
           }
+        } else if (message.startsWith("/trade")) {
+          await sendOrEditPanel(chatId, formatTradePanel(walletViewIndex), "trade");
+          if (update.message?.message_id) {
+            deleteMessage(chatId, update.message.message_id).catch(() => {});
+          }
         } else if (/^\/(wallets|wallet)\b/i.test(message)) {
           await sendOrEditPanel(
             chatId,
             formatWalletCard(walletViewIndex),
             "wallet"
           );
+          if (update.message?.message_id) {
+            deleteMessage(chatId, update.message.message_id).catch(() => {});
+          }
+        } else if (/^\/buy\b/i.test(message)) {
+          const parts = message.trim().split(/\s+/);
+          const sol = Number(parts[1]);
+          const maxPrice = parts[2] !== undefined ? Number(parts[2]) : null;
+          if (Number.isFinite(sol) && sol > 0) {
+            pendingTrade = {
+              type: "buy",
+              sol,
+              maxPrice: Number.isFinite(maxPrice) ? maxPrice : null,
+              summary: `BUY ${sol} SOL${Number.isFinite(maxPrice) ? ` max ${maxPrice}` : ""}`,
+            };
+          }
+          await sendOrEditPanel(chatId, formatTradePanel(walletViewIndex), "trade");
+          if (update.message?.message_id) {
+            deleteMessage(chatId, update.message.message_id).catch(() => {});
+          }
+        } else if (/^\/sellall\b/i.test(message)) {
+          pendingTrade = {
+            type: "sell",
+            pct: 100,
+            minPrice: null,
+            summary: "SELL 100%",
+          };
+          await sendOrEditPanel(chatId, formatTradePanel(walletViewIndex), "trade");
+          if (update.message?.message_id) {
+            deleteMessage(chatId, update.message.message_id).catch(() => {});
+          }
+        } else if (/^\/sell\b/i.test(message)) {
+          const parts = message.trim().split(/\s+/);
+          const pct = Number(parts[1]);
+          const minPrice = parts[2] !== undefined ? Number(parts[2]) : null;
+          if (Number.isFinite(pct) && pct > 0) {
+            pendingTrade = {
+              type: "sell",
+              pct: Math.min(pct, 100),
+              minPrice: Number.isFinite(minPrice) ? minPrice : null,
+              summary: `SELL ${Math.min(pct, 100)}%${Number.isFinite(minPrice) ? ` min ${minPrice}` : ""}`,
+            };
+          }
+          await sendOrEditPanel(chatId, formatTradePanel(walletViewIndex), "trade");
           if (update.message?.message_id) {
             deleteMessage(chatId, update.message.message_id).catch(() => {});
           }
@@ -1028,6 +1130,13 @@ async function pollLoop() {
               "vol"
             );
             await answerCallbackQuery(callback.id, "Vol Bot");
+          } else if (action === "trade_menu") {
+            await sendOrEditPanel(
+              callbackChatId,
+              formatTradePanel(walletViewIndex),
+              "trade"
+            );
+            await answerCallbackQuery(callback.id, "Trade");
           } else if (action === "wallet_prev") {
             const wallets = readWallets();
             if (!wallets.length) {
@@ -1172,6 +1281,78 @@ async function pollLoop() {
             );
             await answerCallbackQuery(callback.id, "Sweep");
           } else if (action === "vol_back") {
+            await sendOrEditPanel(
+              callbackChatId,
+              formatStatus(walletViewIndex),
+              "status"
+            );
+            await answerCallbackQuery(callback.id, "Back");
+          } else if (action === "trade_buy") {
+            await sendOrEditPanel(
+              callbackChatId,
+              formatTradePanel(walletViewIndex),
+              "trade"
+            );
+            await answerCallbackQuery(callback.id, "Use /buy <sol> [maxPrice]");
+          } else if (action === "trade_sell") {
+            await sendOrEditPanel(
+              callbackChatId,
+              formatTradePanel(walletViewIndex),
+              "trade"
+            );
+            await answerCallbackQuery(callback.id, "Use /sell <pct> [minPrice]");
+          } else if (action === "trade_sellall") {
+            pendingTrade = {
+              type: "sell",
+              pct: 100,
+              minPrice: null,
+              summary: "SELL 100%",
+            };
+            await sendOrEditPanel(
+              callbackChatId,
+              formatTradePanel(walletViewIndex),
+              "trade"
+            );
+            await answerCallbackQuery(callback.id, "Pending sell all");
+          } else if (action === "trade_confirm") {
+            if (!pendingTrade) {
+              await answerCallbackQuery(callback.id, "No pending trade");
+              continue;
+            }
+            if (pendingTrade.type === "buy") {
+              appendCommand(
+                `buy ${pendingTrade.sol}${
+                  pendingTrade.maxPrice !== null
+                    ? ` ${pendingTrade.maxPrice}`
+                    : ""
+                }`
+              );
+            } else {
+              appendCommand(
+                `sell ${pendingTrade.pct}${
+                  pendingTrade.minPrice !== null
+                    ? ` ${pendingTrade.minPrice}`
+                    : ""
+                }`
+              );
+            }
+            pendingTrade = null;
+            await sendOrEditPanel(
+              callbackChatId,
+              formatTradePanel(walletViewIndex),
+              "trade"
+            );
+            await answerCallbackQuery(callback.id, "Sent");
+          } else if (action === "trade_cancel") {
+            pendingTrade = null;
+            await sendOrEditPanel(
+              callbackChatId,
+              formatTradePanel(walletViewIndex),
+              "trade"
+            );
+            await answerCallbackQuery(callback.id, "Canceled");
+          } else if (action === "trade_back") {
+            pendingTrade = null;
             await sendOrEditPanel(
               callbackChatId,
               formatStatus(walletViewIndex),

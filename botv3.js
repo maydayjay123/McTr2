@@ -1045,6 +1045,10 @@ async function main() {
     const { name, args } = parseCommandArgs(entry);
     let forceBuy = false;
     let forceSell = false;
+    let manualBuy = null;
+    let manualSell = null;
+    let manualBuy = null;
+    let manualSell = null;
     let recomputeSteps = false;
     let walletChanged = false;
     let mintChanged = false;
@@ -1068,6 +1072,44 @@ async function main() {
       case "bot_force_sell":
       case "forcesell":
         forceSell = true;
+        break;
+      case "buy": {
+        const sol = Number(args[0]);
+        const maxPrice = args[1] !== undefined ? Number(args[1]) : null;
+        if (Number.isFinite(sol) && sol > 0) {
+          manualBuy = {
+            sol,
+            maxPrice: Number.isFinite(maxPrice) ? maxPrice : null,
+          };
+          logInfo("CMD buy", {
+            sol,
+            maxPrice: manualBuy.maxPrice ?? "none",
+          });
+        } else {
+          logWarn("CMD buy ignored: invalid amount", { sol: args[0] });
+        }
+        break;
+      }
+      case "sell": {
+        const pct = Number(args[0]);
+        const minPrice = args[1] !== undefined ? Number(args[1]) : null;
+        if (Number.isFinite(pct) && pct > 0) {
+          manualSell = {
+            pct: Math.min(pct, 100),
+            minPrice: Number.isFinite(minPrice) ? minPrice : null,
+          };
+          logInfo("CMD sell", {
+            pct: manualSell.pct,
+            minPrice: manualSell.minPrice ?? "none",
+          });
+        } else {
+          logWarn("CMD sell ignored: invalid pct", { pct: args[0] });
+        }
+        break;
+      }
+      case "sellall":
+        manualSell = { pct: 100, minPrice: null };
+        logInfo("CMD sellall");
         break;
       case "mint":
       case "setca":
@@ -1206,6 +1248,8 @@ async function main() {
     return {
       forceBuy,
       forceSell,
+      manualBuy,
+      manualSell,
       recomputeSteps,
       walletChanged,
       mintChanged,
@@ -1308,6 +1352,16 @@ async function main() {
     state.lastPriceScaled = current.toString();
     writeState(state);
     return current;
+  }
+
+  function priceScaledToSol(priceScaled) {
+    if (priceScaled === null || priceScaled === undefined) return null;
+    if (state.tokenDecimals === null || state.tokenDecimals === undefined) {
+      return null;
+    }
+    const factor = 10n ** BigInt(state.tokenDecimals);
+    const lamportsPerToken = (BigInt(priceScaled) * factor) / PRICE_SCALE;
+    return Number(lamportsPerToken) / 1e9;
   }
 
   async function doBuy(stepIndex, fromEntry = false, options = {}) {
@@ -1475,6 +1529,42 @@ async function main() {
       label: "DEGEN",
       incrementStep: false,
     });
+  }
+
+  async function doManualBuy(solAmount, maxPrice) {
+    if (!Number.isFinite(solAmount) || solAmount <= 0) {
+      logWarn("Manual buy blocked: invalid amount", { sol: solAmount });
+      return false;
+    }
+    if (Number.isFinite(maxPrice) && maxPrice > 0) {
+      try {
+        const currentPriceScaled = await getCurrentPriceScaled();
+        const currentPrice = priceScaledToSol(currentPriceScaled);
+        if (currentPrice !== null && currentPrice > maxPrice) {
+          logWarn("Manual buy blocked: price above limit", {
+            price: currentPrice,
+            limit: maxPrice,
+          });
+          return false;
+        }
+      } catch (err) {
+        logWarn("Manual buy price check failed", {
+          error: err.message || err,
+        });
+      }
+    }
+    const lamportsOverride = lamportsFromSol(solAmount);
+    const bought = await doBuy(state.stepIndex, false, {
+      lamportsOverride,
+      label: "MANUAL",
+      incrementStep: false,
+    });
+    if (bought) {
+      state.mode = "in_position";
+      state.entryHighScaled = null;
+      writeState(state);
+    }
+    return bought;
   }
 
   async function doSell(
@@ -1647,6 +1737,113 @@ async function main() {
     return true;
   }
 
+  async function doSellAmount(
+    reason,
+    amountTokens,
+    minPrice,
+    slippageOverrideBps
+  ) {
+    let tokenAmount = BigInt(amountTokens || 0);
+    if (tokenAmount <= 0n) {
+      logWarn("Manual sell blocked: invalid amount");
+      return false;
+    }
+    const beforeTokens = await refreshTokenAmount();
+    if (beforeTokens === 0n) {
+      logWarn("Manual sell blocked: no tokens");
+      return false;
+    }
+    if (tokenAmount > beforeTokens) {
+      tokenAmount = beforeTokens;
+    }
+    if (Number.isFinite(minPrice) && minPrice > 0) {
+      try {
+        const currentPriceScaled = await getCurrentPriceScaled();
+        const currentPrice = priceScaledToSol(currentPriceScaled);
+        if (currentPrice !== null && currentPrice < minPrice) {
+          logWarn("Manual sell blocked: price below limit", {
+            price: currentPrice,
+            limit: minPrice,
+          });
+          return false;
+        }
+      } catch (err) {
+        logWarn("Manual sell price check failed", {
+          error: err.message || err,
+        });
+      }
+    }
+    const beforeSol = BigInt(
+      await connection.getBalance(keypair.publicKey, "confirmed")
+    );
+    logInfo("SELL start", {
+      reason,
+      tokens: tokenAmount.toString(),
+      slippageBps: slippageOverrideBps ?? "auto",
+    });
+    const effectiveSellSlippageBps =
+      state.sellSlippageBps !== null && state.sellSlippageBps !== undefined
+        ? Number(state.sellSlippageBps)
+        : sellSlippageBps;
+    const slippageBps =
+      slippageOverrideBps !== undefined
+        ? slippageOverrideBps
+        : effectiveSellSlippageBps;
+    const quote = await fetchQuote(
+      tokenMint,
+      SOL_MINT,
+      tokenAmount,
+      slippageBps
+    );
+    logInfo("SELL quote", {
+      inAmount: tokenAmount.toString(),
+      outAmount: quote.outAmount,
+      priceImpact: quote.priceImpactPct ?? "n/a",
+    });
+    let result;
+    try {
+      result = await executeSwap(connection, keypair, quote, confirmTimeoutMs);
+    } catch (err) {
+      logWarn("SELL failed", {
+        error: formatSwapError(err),
+        slippageBps: slippageBps,
+      });
+      return false;
+    }
+    if (result.confirmed) {
+      logInfo("SELL confirmed", { signature: result.signature });
+    } else {
+      logWarn("SELL sent but not confirmed in time", {
+        signature: result.signature,
+      });
+    }
+    const afterTokens = await refreshTokenAmount();
+    const afterSol = BigInt(
+      await connection.getBalance(keypair.publicKey, "confirmed")
+    );
+    logInfo("SELL balance", {
+      tokensBefore: beforeTokens.toString(),
+      tokensAfter: afterTokens.toString(),
+      solBefore: beforeSol.toString(),
+      solAfter: afterSol.toString(),
+    });
+    const soldRatio =
+      beforeTokens > 0n ? Number(tokenAmount) / Number(beforeTokens) : 0;
+    const totalSpent = BigInt(state.totalSolSpentLamports || "0");
+    const spentPortion = BigInt(Math.round(Number(totalSpent) * soldRatio));
+    const nextSpent = totalSpent > spentPortion ? totalSpent - spentPortion : 0n;
+    state.totalSolSpentLamports = nextSpent.toString();
+    state.totalTokenAmount = afterTokens.toString();
+    if (afterTokens === 0n) {
+      state.stepIndex = 0;
+      state.mode = "waiting_entry";
+      state.referencePriceScaled = state.lastPriceScaled || null;
+      state.trailPeakBps = null;
+    }
+    writeState(state);
+    return true;
+  }
+
   let backoffMs = 0;
   while (true) {
     try {
@@ -1666,6 +1863,8 @@ async function main() {
         const result = applyCommand(entry);
         forceBuy = forceBuy || result.forceBuy;
         forceSell = forceSell || result.forceSell;
+        manualBuy = manualBuy || result.manualBuy;
+        manualSell = manualSell || result.manualSell;
         recomputeSteps = recomputeSteps || result.recomputeSteps;
         walletChanged = walletChanged || result.walletChanged;
         mintChanged = mintChanged || result.mintChanged;
@@ -1786,6 +1985,26 @@ async function main() {
         state.entryHighScaled = null;
         writeState(state);
       }
+      await sleepWithCommandWake(COMMAND_WAKE_MS);
+      continue;
+    }
+
+    if (manualSell) {
+      const totalTokens = await refreshTokenAmount();
+      const amountTokens =
+        (totalTokens * BigInt(Math.round(manualSell.pct * 100))) / 10000n;
+      await doSellAmount(
+        "manual sell",
+        amountTokens,
+        manualSell.minPrice,
+        sellSlippageBps
+      );
+      await sleepWithCommandWake(COMMAND_WAKE_MS);
+      continue;
+    }
+
+    if (manualBuy) {
+      await doManualBuy(manualBuy.sol, manualBuy.maxPrice);
       await sleepWithCommandWake(COMMAND_WAKE_MS);
       continue;
     }
