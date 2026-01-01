@@ -65,6 +65,8 @@ const PRICE_SCALE = 1_000_000_000n;
 const BALANCE_RECALC_THRESHOLD_LAMPORTS = 100000n;
 const BACKOFF_BASE_MS = 5000;
 const BACKOFF_MAX_MS = 60000;
+const COMMAND_WAKE_MS = 250;
+const RPC_ROTATE_EVERY_LOOP = process.env.RPC_ROTATE_EVERY_LOOP !== "false";
 const LOG_FILE =
   process.env.BOT_LOG_PATH ||
   path.join(
@@ -340,6 +342,16 @@ function buildRpcUrls() {
   return list;
 }
 
+function getCommandMtimeMs() {
+  try {
+    if (!fs.existsSync(COMMANDS_PATH)) return null;
+    const stat = fs.statSync(COMMANDS_PATH);
+    return Number(stat.mtimeMs) || null;
+  } catch {
+    return null;
+  }
+}
+
 function isRateLimitError(err) {
   const message = String(err?.message || err || "");
   return message.includes("429") || message.includes("Too Many Requests");
@@ -385,7 +397,7 @@ function formatTableRow(row) {
   ].join(" | ");
 }
 
-function formatSwapError(err) {
+  function formatSwapError(err) {
   const message = String(err?.message || err || "Unknown error");
   const codeMatch = message.match(/custom program error: (0x[0-9a-fA-F]+)/);
   if (codeMatch) {
@@ -422,6 +434,23 @@ async function fetchWithFallback(urls, label) {
 
     if (response.status !== 404) {
       throw new Error(`${label} failed: ${response.status} (${url})`);
+    }
+  }
+
+  async function sleepWithCommandWake(totalMs) {
+    const start = Date.now();
+    const baseMtime = getCommandMtimeMs();
+    while (Date.now() - start < totalMs) {
+      const remaining = totalMs - (Date.now() - start);
+      const slice = Math.min(COMMAND_WAKE_MS, remaining);
+      await new Promise((resolve) => setTimeout(resolve, slice));
+      const nextMtime = getCommandMtimeMs();
+      if (
+        (baseMtime === null && nextMtime !== null) ||
+        (baseMtime !== null && nextMtime !== null && nextMtime > baseMtime)
+      ) {
+        return;
+      }
     }
   }
 
@@ -1571,7 +1600,7 @@ async function main() {
     try {
     if (backoffMs > 0) {
       logWarn("BACKOFF sleep", { ms: backoffMs });
-      await new Promise((resolve) => setTimeout(resolve, backoffMs));
+      await sleepWithCommandWake(backoffMs);
       backoffMs = 0;
     }
     const commandRead = readCommandEntries(state.lastCommandLine);
@@ -1628,7 +1657,7 @@ async function main() {
 
     if (state.paused) {
       logInfo("PAUSED");
-      await new Promise((resolve) => setTimeout(resolve, pollMs));
+      await sleepWithCommandWake(pollMs);
       continue;
     }
 
@@ -1641,7 +1670,7 @@ async function main() {
       } catch (err) {
         logWarn("Force sell failed", { error: err.message || err });
       }
-      await new Promise((resolve) => setTimeout(resolve, pollMs));
+      await sleepWithCommandWake(COMMAND_WAKE_MS);
       continue;
     }
 
@@ -1652,7 +1681,7 @@ async function main() {
         state.entryHighScaled = null;
         writeState(state);
       }
-      await new Promise((resolve) => setTimeout(resolve, pollMs));
+      await sleepWithCommandWake(COMMAND_WAKE_MS);
       continue;
     }
     if (state.mode === "in_position") {
@@ -1689,7 +1718,7 @@ async function main() {
         walletPnl: "0.000000",
         solBal: "0.000000",
         });
-        await new Promise((resolve) => setTimeout(resolve, pollMs));
+        await sleepWithCommandWake(pollMs);
         continue;
       }
 
@@ -1761,7 +1790,7 @@ async function main() {
       if (dropBps >= entryDropBps) {
         await refreshTokenAmount();
         const bought = await doBuy(0, true);
-        await new Promise((resolve) => setTimeout(resolve, pollMs));
+        await sleepWithCommandWake(pollMs);
         if (bought) {
           state.mode = "in_position";
           state.entryHighScaled = null;
@@ -1771,7 +1800,7 @@ async function main() {
         }
       }
 
-      await new Promise((resolve) => setTimeout(resolve, pollMs));
+      await sleepWithCommandWake(pollMs);
       continue;
     }
 
@@ -1780,7 +1809,7 @@ async function main() {
 
     if (state.stepIndex === 0 && totalSolSpent === 0n) {
       const bought = await doBuy(0);
-      await new Promise((resolve) => setTimeout(resolve, pollMs));
+      await sleepWithCommandWake(pollMs);
       if (!bought) {
         logWarn("BUY step 1 will retry on next tick.");
       }
@@ -1800,7 +1829,7 @@ async function main() {
           state.stepIndex = 0;
           state.totalSolSpentLamports = "0";
           writeState(state);
-          await new Promise((resolve) => setTimeout(resolve, pollMs));
+          await sleepWithCommandWake(pollMs);
           continue;
         }
       }
@@ -1828,7 +1857,7 @@ async function main() {
         walletPnl: formatSolFromLamports(walletPnl),
         solBal: formatSolFromLamports(solBalLamports),
       });
-      await new Promise((resolve) => setTimeout(resolve, pollMs));
+      await sleepWithCommandWake(pollMs);
       continue;
     }
 
@@ -1842,7 +1871,7 @@ async function main() {
     const outAmountRaw = BigInt(priceQuote.outAmount);
     if (outAmountRaw === 0n) {
       logWarn("Price quote returned 0 output. Waiting...");
-      await new Promise((resolve) => setTimeout(resolve, pollMs));
+      await sleepWithCommandWake(pollMs);
       continue;
     }
 
@@ -1877,7 +1906,7 @@ async function main() {
       );
       if (drawdownBps >= triggerBps) {
         const bought = await doBuy(state.stepIndex);
-        await new Promise((resolve) => setTimeout(resolve, pollMs));
+        await sleepWithCommandWake(pollMs);
         if (!bought) {
           logWarn("BUY step will retry on next tick", {
             step: state.stepIndex + 1,
@@ -2010,7 +2039,10 @@ async function main() {
     }
 
 
-    await new Promise((resolve) => setTimeout(resolve, pollMs));
+    if (RPC_ROTATE_EVERY_LOOP && rpcUrls.length > 1) {
+      rotateConnection();
+    }
+    await sleepWithCommandWake(pollMs);
     } catch (err) {
       const errorMsg = err.message || err;
       if (isRateLimitError(err) && rpcUrls.length > 1) {
@@ -2028,7 +2060,7 @@ async function main() {
         );
       }
       logError("Loop error", { error: errorMsg });
-      await new Promise((resolve) => setTimeout(resolve, pollMs));
+      await sleepWithCommandWake(pollMs);
     }
   }
 }
