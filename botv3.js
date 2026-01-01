@@ -1749,6 +1749,23 @@ async function main() {
       continue;
     }
 
+    if (
+      state.mode === "in_position" &&
+      (!state.lastPriceScaled || state.lastPriceScaled === "0")
+    ) {
+      try {
+        await getCurrentPriceScaled();
+        const solBalLamports = state.lastSolBalanceLamports
+          ? BigInt(state.lastSolBalanceLamports)
+          : BigInt(
+              await connection.getBalance(keypair.publicKey, "confirmed")
+            );
+        updateSnapshot(solBalLamports);
+      } catch (err) {
+        logWarn("Price sync failed", { error: err.message || err });
+      }
+    }
+
     if (forceSell) {
       try {
         const currentPriceScaled = await getCurrentPriceScaled();
