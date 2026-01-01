@@ -1231,6 +1231,10 @@ async function main() {
     }
     console.log(formatTableRow(row));
     lineCount += 1;
+    if (!state.lastMetrics || state.lastMetrics.time !== row.time) {
+      state.lastMetrics = row;
+      writeState(state);
+    }
   }
 
   async function refreshTokenAmount() {

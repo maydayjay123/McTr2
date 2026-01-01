@@ -314,7 +314,7 @@ function formatStatus(index) {
   const paths = getPathsForIndex(index);
   const state = readState(paths.statePath);
   const lines = readLogLines(paths.logPath);
-  const metrics = findLatestMetrics(lines);
+  const metrics = state?.lastMetrics || findLatestMetrics(lines);
   const lastTradePnl = findLastTradePnl(lines);
 
   const mode = state?.mode || metrics?.mode || "unknown";
