@@ -1717,7 +1717,14 @@ async function main() {
           "confirmed"
         );
         updateLastSolBalance(BigInt(solBalLamports));
-        await refreshTokenAmount();
+        const refreshedTokens = await refreshTokenAmount();
+        if (refreshedTokens > 0n || BigInt(state.totalSolSpentLamports || "0") > 0n) {
+          if (state.mode !== "in_position") {
+            state.mode = "in_position";
+          }
+        } else if (state.mode === "in_position") {
+          state.mode = "waiting_entry";
+        }
         updateSnapshot(BigInt(solBalLamports));
         state.lastBalanceRefreshTs = Date.now();
         writeState(state);
