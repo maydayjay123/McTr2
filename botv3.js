@@ -67,6 +67,7 @@ const BACKOFF_BASE_MS = 5000;
 const BACKOFF_MAX_MS = 60000;
 const COMMAND_WAKE_MS = 250;
 const RPC_ROTATE_EVERY_LOOP = process.env.RPC_ROTATE_EVERY_LOOP !== "false";
+const BALANCE_REFRESH_MS = Number(process.env.BALANCE_REFRESH_MS || 30000);
 const LOG_FILE =
   process.env.BOT_LOG_PATH ||
   path.join(
@@ -895,6 +896,9 @@ async function main() {
   if (state.lastSolBalanceLamports === undefined) {
     state.lastSolBalanceLamports = null;
   }
+  if (state.lastBalanceRefreshTs === undefined) {
+    state.lastBalanceRefreshTs = null;
+  }
   if (state.paused === undefined) {
     state.paused = false;
   }
@@ -1654,6 +1658,24 @@ async function main() {
 
     targetProfitBps = BigInt(Number(state.settings.minProfitBps));
     entryDropPct = Number(state.settings.entryDropPct);
+
+    const refreshNow =
+      !state.lastBalanceRefreshTs ||
+      Date.now() - Number(state.lastBalanceRefreshTs) >= BALANCE_REFRESH_MS;
+    if (refreshNow) {
+      try {
+        const solBalLamports = await connection.getBalance(
+          keypair.publicKey,
+          "confirmed"
+        );
+        updateLastSolBalance(BigInt(solBalLamports));
+        await refreshTokenAmount();
+        state.lastBalanceRefreshTs = Date.now();
+        writeState(state);
+      } catch (err) {
+        logWarn("Balance refresh failed", { error: err.message || err });
+      }
+    }
 
     if (state.paused) {
       logInfo("PAUSED");
