@@ -25,6 +25,11 @@ const SWEEP_KEEP_LAMPORTS = 50000n;
 const MAX_ROUNDS = 5;
 const SELL_RETRY_DELAY_MS = 2000;
 const MAX_SELL_RETRIES = 3;
+const TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+const EXTRA_MINTS = (process.env.SWEEP_EXTRA_MINTS || "")
+  .split(",")
+  .map((item) => item.trim())
+  .filter(Boolean);
 const SELL_SLIPPAGE_BPS = Number(process.env.SWEEP_SELL_SLIPPAGE_BPS || 100);
 const WALLET_FILES = [
   process.env.WALLETS_FILE || path.join(__dirname, "wallets.json"),
@@ -155,17 +160,44 @@ async function executeSwap(connection, keypair, quote) {
   return signature;
 }
 
-async function getTokenAccounts(connection, owner) {
-  const accounts = await connection.getParsedTokenAccountsByOwner(
-    owner,
-    { programId: new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA") },
-    "confirmed"
-  );
-  return accounts.value.map((acc) => acc.account.data.parsed.info);
+async function resolveProgramIds(connection) {
+  const ids = new Set([TOKEN_PROGRAM_ID]);
+  for (const mint of EXTRA_MINTS) {
+    try {
+      const info = await connection.getAccountInfo(new PublicKey(mint));
+      if (info?.owner) {
+        ids.add(info.owner.toBase58());
+      }
+    } catch (err) {
+      logLine(`Mint lookup failed | mint=${mint} error=${err.message || err}`);
+    }
+  }
+  return Array.from(ids);
 }
 
-async function getTokenBalances(connection, owner) {
-  const infos = await getTokenAccounts(connection, owner);
+async function getTokenAccounts(connection, owner, programIds) {
+  const infos = [];
+  for (const programId of programIds) {
+    try {
+      const accounts = await connection.getParsedTokenAccountsByOwner(
+        owner,
+        { programId: new PublicKey(programId) },
+        "confirmed"
+      );
+      for (const acc of accounts.value) {
+        infos.push(acc.account.data.parsed.info);
+      }
+    } catch (err) {
+      logLine(
+        `Token scan failed | wallet=${owner.toBase58()} program=${programId} error=${err.message || err}`
+      );
+    }
+  }
+  return infos;
+}
+
+async function getTokenBalances(connection, owner, programIds) {
+  const infos = await getTokenAccounts(connection, owner, programIds);
   return infos
     .map((info) => ({
       mint: info.mint,
@@ -200,11 +232,11 @@ async function confirmSignature(connection, signature) {
   return !result.value.err;
 }
 
-async function sweepWallet(connection, entry, targetPubkey) {
+async function sweepWallet(connection, entry, targetPubkey, programIds) {
   const keypair = Keypair.fromSecretKey(Uint8Array.from(entry.secretKey));
   const owner = keypair.publicKey;
   let anyAction = false;
-  let balances = await getTokenBalances(connection, owner);
+  let balances = await getTokenBalances(connection, owner, programIds);
   let attempt = 0;
   while (balances.length && attempt < MAX_SELL_RETRIES) {
     for (const bal of balances) {
@@ -224,7 +256,7 @@ async function sweepWallet(connection, entry, targetPubkey) {
       }
     }
     await new Promise((resolve) => setTimeout(resolve, SELL_RETRY_DELAY_MS));
-    balances = await getTokenBalances(connection, owner);
+    balances = await getTokenBalances(connection, owner, programIds);
     attempt += 1;
   }
 
@@ -275,15 +307,25 @@ async function main() {
   if (!wallets.length) {
     throw new Error("No wallets found.");
   }
+  const programIds = await resolveProgramIds(connection);
   logLine(`Target address: ${TARGET_ADDRESS}`);
   logLine(`Wallets loaded: ${wallets.length}`);
+  logLine(`Token programs: ${programIds.join(",")}`);
+  if (EXTRA_MINTS.length) {
+    logLine(`Extra mints: ${EXTRA_MINTS.join(",")}`);
+  }
 
   let totalRecovered = 0n;
   for (let round = 1; round <= MAX_ROUNDS; round += 1) {
     logLine(`ROUND ${round}/${MAX_ROUNDS} start`);
     let roundAction = false;
     for (const entry of wallets) {
-      const result = await sweepWallet(connection, entry, targetPubkey);
+      const result = await sweepWallet(
+        connection,
+        entry,
+        targetPubkey,
+        programIds
+      );
       totalRecovered += result.sentLamports;
       roundAction = roundAction || result.anyAction;
     }
