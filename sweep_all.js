@@ -21,7 +21,7 @@ const RPC_URLS = (process.env.SOLANA_RPC_URLS || process.env.RPC_URLS || "")
   .map((item) => item.trim())
   .filter(Boolean);
 const RPC_URL = process.env.SOLANA_RPC_URL;
-const SWEEP_KEEP_LAMPORTS = 5000n;
+const SWEEP_KEEP_LAMPORTS = 50000n;
 const MAX_ROUNDS = 5;
 const SELL_RETRY_DELAY_MS = 2000;
 const MAX_SELL_RETRIES = 3;
@@ -195,6 +195,11 @@ async function transferSol(connection, keypair, target, lamports) {
   return sig;
 }
 
+async function confirmSignature(connection, signature) {
+  const result = await connection.confirmTransaction(signature, "confirmed");
+  return !result.value.err;
+}
+
 async function sweepWallet(connection, entry, targetPubkey) {
   const keypair = Keypair.fromSecretKey(Uint8Array.from(entry.secretKey));
   const owner = keypair.publicKey;
@@ -242,11 +247,17 @@ async function sweepWallet(connection, entry, targetPubkey) {
         targetPubkey,
         sendLamports
       );
+      const confirmed = await confirmSignature(connection, sig);
+      if (confirmed) {
+        logLine(
+          `SEND ok | wallet=${owner.toBase58()} sol=${Number(sendLamports) / 1e9} sig=${sig}`
+        );
+        anyAction = true;
+        return { sentLamports: sendLamports, anyAction };
+      }
       logLine(
-        `SEND ok | wallet=${owner.toBase58()} sol=${Number(sendLamports) / 1e9} sig=${sig}`
+        `SEND failed | wallet=${owner.toBase58()} error=confirmation failed sig=${sig}`
       );
-      anyAction = true;
-      return { sentLamports: sendLamports, anyAction };
     } catch (err) {
       logLine(
         `SEND failed | wallet=${owner.toBase58()} error=${err.message || err}`
