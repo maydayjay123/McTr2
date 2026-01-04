@@ -23,6 +23,8 @@ const RPC_URLS = (process.env.SOLANA_RPC_URLS || process.env.RPC_URLS || "")
 const RPC_URL = process.env.SOLANA_RPC_URL;
 const SWEEP_KEEP_LAMPORTS = 5000n;
 const MAX_ROUNDS = 5;
+const SELL_RETRY_DELAY_MS = 2000;
+const MAX_SELL_RETRIES = 3;
 const SELL_SLIPPAGE_BPS = Number(process.env.SWEEP_SELL_SLIPPAGE_BPS || 100);
 const WALLET_FILES = [
   process.env.WALLETS_FILE || path.join(__dirname, "wallets.json"),
@@ -162,6 +164,16 @@ async function getTokenAccounts(connection, owner) {
   return accounts.value.map((acc) => acc.account.data.parsed.info);
 }
 
+async function getTokenBalances(connection, owner) {
+  const infos = await getTokenAccounts(connection, owner);
+  return infos
+    .map((info) => ({
+      mint: info.mint,
+      amount: BigInt(info.tokenAmount.amount),
+    }))
+    .filter((info) => info.amount > 0n);
+}
+
 async function sellToken(connection, keypair, mint, amount) {
   const quote = await fetchQuote(mint, SOL_MINT, amount, SELL_SLIPPAGE_BPS);
   const sig = await executeSwap(connection, keypair, quote);
@@ -187,28 +199,49 @@ async function sweepWallet(connection, entry, targetPubkey) {
   const keypair = Keypair.fromSecretKey(Uint8Array.from(entry.secretKey));
   const owner = keypair.publicKey;
   let anyAction = false;
-  const tokenAccounts = await getTokenAccounts(connection, owner);
-  for (const info of tokenAccounts) {
-    const mint = info.mint;
-    const amount = BigInt(info.tokenAmount.amount);
-    if (amount <= 0n) continue;
-    logLine(`SELL start | wallet=${owner.toBase58()} mint=${mint} amount=${amount}`);
-    try {
-      const sig = await sellToken(connection, keypair, mint, amount);
-      logLine(`SELL ok | wallet=${owner.toBase58()} mint=${mint} sig=${sig}`);
-      anyAction = true;
-    } catch (err) {
+  let balances = await getTokenBalances(connection, owner);
+  let attempt = 0;
+  while (balances.length && attempt < MAX_SELL_RETRIES) {
+    for (const bal of balances) {
       logLine(
-        `SELL failed | wallet=${owner.toBase58()} mint=${mint} error=${err.message || err}`
+        `SELL start | wallet=${owner.toBase58()} mint=${bal.mint} amount=${bal.amount}`
+      );
+      try {
+        const sig = await sellToken(connection, keypair, bal.mint, bal.amount);
+        logLine(
+          `SELL ok | wallet=${owner.toBase58()} mint=${bal.mint} sig=${sig}`
+        );
+        anyAction = true;
+      } catch (err) {
+        logLine(
+          `SELL failed | wallet=${owner.toBase58()} mint=${bal.mint} error=${err.message || err}`
+        );
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, SELL_RETRY_DELAY_MS));
+    balances = await getTokenBalances(connection, owner);
+    attempt += 1;
+  }
+
+  if (balances.length) {
+    for (const bal of balances) {
+      logLine(
+        `TOKENS remain | wallet=${owner.toBase58()} mint=${bal.mint} amount=${bal.amount}`
       );
     }
+    return { sentLamports: 0n, anyAction };
   }
 
   const solBal = BigInt(await connection.getBalance(owner, "confirmed"));
   if (solBal > SWEEP_KEEP_LAMPORTS) {
     const sendLamports = solBal - SWEEP_KEEP_LAMPORTS;
     try {
-      const sig = await transferSol(connection, keypair, targetPubkey, sendLamports);
+      const sig = await transferSol(
+        connection,
+        keypair,
+        targetPubkey,
+        sendLamports
+      );
       logLine(
         `SEND ok | wallet=${owner.toBase58()} sol=${Number(sendLamports) / 1e9} sig=${sig}`
       );
