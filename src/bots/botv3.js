@@ -199,7 +199,7 @@ function normalizeStepDrawdownPct(values, stepCount) {
   if (!list.length) {
     return null;
   }
-  const normalized = list[0] === 0 ? list : [0, ...list];
+  const normalized = [...list];
   if (!stepCount) {
     return normalized;
   }
