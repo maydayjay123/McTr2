@@ -458,26 +458,26 @@ async function fetchWithFallback(urls, label) {
     }
   }
 
-  async function sleepWithCommandWake(totalMs) {
-    const start = Date.now();
-    const baseMtime = getCommandMtimeMs();
-    while (Date.now() - start < totalMs) {
-      const remaining = totalMs - (Date.now() - start);
-      const slice = Math.min(COMMAND_WAKE_MS, remaining);
-      await new Promise((resolve) => setTimeout(resolve, slice));
-      const nextMtime = getCommandMtimeMs();
-      if (
-        (baseMtime === null && nextMtime !== null) ||
-        (baseMtime !== null && nextMtime !== null && nextMtime > baseMtime)
-      ) {
-        return;
-      }
-    }
-  }
-
   throw new Error(
     `${label} failed: endpoint not found (404). Tried: ${urls.join(", ")}`
   );
+}
+
+async function sleepWithCommandWake(totalMs) {
+  const start = Date.now();
+  const baseMtime = getCommandMtimeMs();
+  while (Date.now() - start < totalMs) {
+    const remaining = totalMs - (Date.now() - start);
+    const slice = Math.min(COMMAND_WAKE_MS, remaining);
+    await new Promise((resolve) => setTimeout(resolve, slice));
+    const nextMtime = getCommandMtimeMs();
+    if (
+      (baseMtime === null && nextMtime !== null) ||
+      (baseMtime !== null && nextMtime !== null && nextMtime > baseMtime)
+    ) {
+      return;
+    }
+  }
 }
 
 async function fetchQuote(inputMint, outputMint, amount, slippageBps) {
@@ -1879,6 +1879,8 @@ async function main() {
     const commandRead = readCommandEntries(state.lastCommandLine);
     let forceBuy = false;
     let forceSell = false;
+    let manualBuy = null;
+    let manualSell = null;
     let recomputeSteps = false;
     let walletChanged = false;
     let mintChanged = false;
