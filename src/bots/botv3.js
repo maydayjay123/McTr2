@@ -934,8 +934,35 @@ async function main() {
   if (state.lastBalanceRefreshTs === undefined) {
     state.lastBalanceRefreshTs = null;
   }
+  if (state.nextBalanceRefreshTs === undefined) {
+    state.nextBalanceRefreshTs = null;
+  }
+  if (state.balanceRefreshBackoffMs === undefined) {
+    state.balanceRefreshBackoffMs = 0;
+  }
   if (state.costBasisEstimated === undefined) {
     state.costBasisEstimated = false;
+  }
+  if (state.lastBuyAt === undefined) {
+    state.lastBuyAt = null;
+  }
+  if (state.lastBuyPriceScaled === undefined) {
+    state.lastBuyPriceScaled = null;
+  }
+  if (state.lastBuySolLamports === undefined) {
+    state.lastBuySolLamports = null;
+  }
+  if (state.lastSellAt === undefined) {
+    state.lastSellAt = null;
+  }
+  if (state.lastSellPriceScaled === undefined) {
+    state.lastSellPriceScaled = null;
+  }
+  if (state.lastSellSolDeltaLamports === undefined) {
+    state.lastSellSolDeltaLamports = null;
+  }
+  if (state.lastSellSignature === undefined) {
+    state.lastSellSignature = null;
   }
   if (state.paused === undefined) {
     state.paused = false;
@@ -1089,6 +1116,7 @@ async function main() {
     let walletChanged = false;
     let mintChanged = false;
     let sessionReset = false;
+    let reconcile = false;
 
     switch (name) {
       case "bot_start":
@@ -1283,6 +1311,11 @@ async function main() {
         sessionReset = true;
         logInfo("CMD session reset");
         break;
+      case "reconcile":
+      case "resync":
+        reconcile = true;
+        logInfo("CMD reconcile");
+        break;
       default:
         break;
     }
@@ -1296,6 +1329,7 @@ async function main() {
       walletChanged,
       mintChanged,
       sessionReset,
+      reconcile,
     };
   }
 
@@ -1513,6 +1547,13 @@ async function main() {
     }
 
     const actualSpent = beforeSol > afterSol ? beforeSol - afterSol : lamports;
+    const deltaTokens = afterTokens - beforeTokens.amount;
+    if (deltaTokens > 0n) {
+      const priceScaled = (actualSpent * PRICE_SCALE) / deltaTokens;
+      state.lastBuyPriceScaled = priceScaled.toString();
+      state.lastBuyAt = ts();
+      state.lastBuySolLamports = actualSpent.toString();
+    }
     state.totalSolSpentLamports = (
       BigInt(state.totalSolSpentLamports) + actualSpent
     ).toString();
@@ -1705,6 +1746,7 @@ async function main() {
         signature: result.signature,
       });
     }
+    state.lastSellSignature = result.signature;
     const afterTokens = await refreshTokenAmount();
     const afterSol = BigInt(
       await connection.getBalance(keypair.publicKey, "confirmed")
@@ -1750,6 +1792,9 @@ async function main() {
         BigInt(state.stats.realizedPnlLamports) + realizedPnlLamports
       ).toString();
       state.stats.lastSellPnlLamports = realizedPnlLamports.toString();
+      state.lastSellSolDeltaLamports = solDelta.toString();
+      state.lastSellPriceScaled = currentPriceScaled.toString();
+      state.lastSellAt = ts();
       const line = `${ts()} | pct ${(realizedPnlPct * 100).toFixed(
         2
       )}% | pnl ${formatSolFromLamports(
@@ -1906,6 +1951,7 @@ async function main() {
     let walletChanged = false;
     let mintChanged = false;
     let sessionReset = false;
+    let reconcile = false;
     if (commandRead.entries.length) {
       for (const entry of commandRead.entries) {
         const result = applyCommand(entry);
@@ -1917,6 +1963,7 @@ async function main() {
         walletChanged = walletChanged || result.walletChanged;
         mintChanged = mintChanged || result.mintChanged;
         sessionReset = sessionReset || result.sessionReset;
+        reconcile = reconcile || result.reconcile;
       }
       state.lastCommandLine = commandRead.nextIndex;
       writeState(state);
@@ -1933,6 +1980,27 @@ async function main() {
         state.stats.startedAt = ts();
       }
       writeState(state);
+    }
+
+    if (reconcile) {
+      try {
+        const solBalLamports = await connection.getBalance(
+          keypair.publicKey,
+          "confirmed"
+        );
+        updateLastSolBalance(BigInt(solBalLamports));
+        const refreshedTokens = await refreshTokenAmount();
+        await getCurrentPriceScaled();
+        if (refreshedTokens > 0n || BigInt(state.totalSolSpentLamports || "0") > 0n) {
+          state.mode = "in_position";
+        } else {
+          state.mode = "waiting_entry";
+        }
+        updateSnapshot(BigInt(solBalLamports));
+        writeState(state);
+      } catch (err) {
+        logWarn("Reconcile failed", { error: err.message || err });
+      }
     }
 
     if (!tokenMint || !mintPubkey) {
@@ -1978,9 +2046,11 @@ async function main() {
     targetProfitBps = BigInt(Number(state.settings.minProfitBps));
     entryDropPct = Number(state.settings.entryDropPct);
 
+    const now = Date.now();
     const refreshNow =
-      !state.lastBalanceRefreshTs ||
-      Date.now() - Number(state.lastBalanceRefreshTs) >= BALANCE_REFRESH_MS;
+      (!state.lastBalanceRefreshTs ||
+        now - Number(state.lastBalanceRefreshTs) >= BALANCE_REFRESH_MS) &&
+      (!state.nextBalanceRefreshTs || now >= Number(state.nextBalanceRefreshTs));
     if (refreshNow) {
       try {
         const solBalLamports = await connection.getBalance(
@@ -2022,10 +2092,21 @@ async function main() {
           state.mode = "waiting_entry";
         }
         updateSnapshot(BigInt(solBalLamports));
-        state.lastBalanceRefreshTs = Date.now();
+        state.lastBalanceRefreshTs = now;
+        state.balanceRefreshBackoffMs = 0;
+        state.nextBalanceRefreshTs = null;
         writeState(state);
       } catch (err) {
         logWarn("Balance refresh failed", { error: err.message || err });
+        const nextBackoff = Math.min(
+          state.balanceRefreshBackoffMs
+            ? state.balanceRefreshBackoffMs * 2
+            : BACKOFF_BASE_MS,
+          BACKOFF_MAX_MS
+        );
+        state.balanceRefreshBackoffMs = nextBackoff;
+        state.nextBalanceRefreshTs = now + nextBackoff;
+        writeState(state);
       }
     }
 

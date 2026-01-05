@@ -290,6 +290,18 @@ function lamportsToSol(value) {
   return num / 1e9;
 }
 
+function priceScaledToSol(priceScaled, decimals) {
+  if (priceScaled === null || priceScaled === undefined) return null;
+  if (!Number.isFinite(decimals) || decimals <= 0) return null;
+  try {
+    const factor = 10n ** BigInt(decimals);
+    const lamportsPerToken = (BigInt(priceScaled) * factor) / 1_000_000_000n;
+    return Number(lamportsPerToken) / 1e9;
+  } catch {
+    return null;
+  }
+}
+
 function countTrades(lines) {
   return lines.filter((line) => line.includes("SELL confirmed")).length;
 }
@@ -384,6 +396,22 @@ function formatStatus(index) {
   const trailStop =
     trailPeak !== null ? trailPeak - trailGap : null;
   const trailMin = Number(process.env.TRAILING_MIN_PROFIT_PCT || 0);
+  const lastBuyPrice = priceScaledToSol(
+    state?.lastBuyPriceScaled,
+    state?.tokenDecimals
+  );
+  const lastSellPrice = priceScaledToSol(
+    state?.lastSellPriceScaled,
+    state?.tokenDecimals
+  );
+  const lastBuySol = lamportsToSol(state?.lastBuySolLamports);
+  const lastSellSol = lamportsToSol(state?.lastSellSolDeltaLamports);
+  const lastBuyText = lastBuyPrice !== null ? lastBuyPrice.toFixed(8) : "--";
+  const lastSellText = lastSellPrice !== null ? lastSellPrice.toFixed(8) : "--";
+  const lastBuySolText = lastBuySol !== null ? lastBuySol.toFixed(6) : "--";
+  const lastSellSolText = lastSellSol !== null ? lastSellSol.toFixed(6) : "--";
+  const lastBuyAt = state?.lastBuyAt || "--";
+  const lastSellAt = state?.lastSellAt || "--";
 
   let livePnlPct = "--";
   if (metrics?.posSol && metrics?.tradePnl) {
@@ -464,6 +492,9 @@ function formatStatus(index) {
     `TP TARGET: ${tpPct}`,
     `TRAIL    : start ${trailStart.toFixed(1)}% gap ${trailGap.toFixed(1)}% min ${trailMin.toFixed(1)}%`,
     `TRAIL POS: ${trailPeak !== null ? `peak ${trailPeak.toFixed(2)}% stop ${trailStop.toFixed(2)}%` : "idle"}`,
+    "",
+    `LAST BUY : ${lastBuyAt} @ ${lastBuyText} (${lastBuySolText} SOL)`,
+    `LAST SELL: ${lastSellAt} @ ${lastSellText} (${lastSellSolText} SOL)`,
     "",
     `SESSION  : ${sessionStartText} -> ${sessionNowText} SOL`,
     `SESSION$ : ${sessionPnlText} (${sessionPctText})`,
@@ -661,6 +692,7 @@ function formatLab(index) {
     `STEPDROP : ${stepDrawdown}   (/step 2 5)`,
     "",
     `SET CA   : /setCA <mint>`,
+    `RECONCILE: /reconcile`,
     `SESSION  : /sessionreset`,
     `FORCEBUY : /forcebuy`,
     `FORCESELL: /forcesell`,
@@ -1109,7 +1141,7 @@ async function pollLoop() {
           if (update.message?.message_id) {
             deleteMessage(chatId, update.message.message_id).catch(() => {});
           }
-        } else if (/^\/(minTP|walletUSE|setDEGEN|buyDUMP|stepSIZE|step|setCA|sessionreset)\b/i.test(message)) {
+        } else if (/^\/(minTP|walletUSE|setDEGEN|buyDUMP|stepSIZE|step|setCA|sessionreset|reconcile|resync)\b/i.test(message)) {
           const cleaned = message.replace(/^\//, "");
           appendCommand(cleaned);
           await sendOrEditPanel(chatId, formatStatus(walletViewIndex), "status");
