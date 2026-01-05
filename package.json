@@ -1,23 +1,25 @@
 {
     "name":  "mm-profit",
-    "version":  "0.1.0",
+    "version":  "0.2.0",
     "private":  true,
-    "description":  "Simple Solana wallet sweeper",
+    "description":  "Professional Solana Trading Bot with Advanced Features",
     "main":  "sweep.js",
     "scripts":  {
-                    "start":  "node sweep.js",
-    "swap":  "node swap.js",
-    "sell":  "node sell.js",
-    "bot":  "node src/bots/bot_manager.js",
-    "botv3": "node src/bots/botv3.js",
-    "manager": "node src/bots/bot_manager.js",
-    "vol": "node src/bots/botVol.js",
-    "tg": "node src/bots/tg_bot.js",
-    "pnl":  "node pnl_report.js"
-                },
+        "start":  "node sweep.js",
+        "swap":  "node swap.js",
+        "sell":  "node sell.js",
+        "bot":  "node src/bots/bot_manager.js",
+        "botv3": "node src/bots/botv3.js",
+        "botv4": "node src/bots/botv4.js",
+        "manager": "node src/bots/bot_manager.js",
+        "vol": "node src/bots/botVol.js",
+        "tg": "node src/bots/tg_bot.js",
+        "tg2": "node src/bots/tg_bot_v2.js",
+        "pnl":  "node pnl_report.js"
+    },
     "dependencies":  {
-                         "@solana/web3.js":  "^1.95.4",
-                         "dotenv":  "^16.4.5",
-                         "node-fetch":  "^2.6.12"
-                     }
+        "@solana/web3.js":  "^1.95.4",
+        "dotenv":  "^16.4.5",
+        "node-fetch":  "^2.6.12"
+    }
 }
