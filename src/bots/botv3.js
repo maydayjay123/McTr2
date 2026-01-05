@@ -618,6 +618,13 @@ function computeBps(numerator, denominator) {
   return (numerator * 10000n) / denominator;
 }
 
+function estimateSolValueLamports(amountRaw, priceScaled) {
+  if (!priceScaled || priceScaled === "0") {
+    return null;
+  }
+  return (BigInt(priceScaled) * amountRaw) / PRICE_SCALE;
+}
+
 async function waitForSignature(connection, signature, timeoutMs) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -927,6 +934,9 @@ async function main() {
   if (state.lastBalanceRefreshTs === undefined) {
     state.lastBalanceRefreshTs = null;
   }
+  if (state.costBasisEstimated === undefined) {
+    state.costBasisEstimated = false;
+  }
   if (state.paused === undefined) {
     state.paused = false;
   }
@@ -948,15 +958,18 @@ async function main() {
   targetProfitBps = BigInt(Number(state.settings.minProfitBps));
   entryDropPct = Number(state.settings.entryDropPct);
   state.startPriceScaled = null;
-  state.startSolBalanceLamports = null;
-  state.sessionStartTs = ts();
+  if (!state.sessionStartTs) {
+    state.sessionStartTs = ts();
+  }
 
   let mintPubkey = tokenMint ? new PublicKey(tokenMint) : null;
   const sessionStartBalance = await connection.getBalance(
     keypair.publicKey,
     "confirmed"
   );
-  state.startSolBalanceLamports = sessionStartBalance.toString();
+  if (!state.startSolBalanceLamports) {
+    state.startSolBalanceLamports = sessionStartBalance.toString();
+  }
   writeState(state);
 
   function computeStepLamports(balanceLamports) {
@@ -1075,6 +1088,7 @@ async function main() {
     let recomputeSteps = false;
     let walletChanged = false;
     let mintChanged = false;
+    let sessionReset = false;
 
     switch (name) {
       case "bot_start":
@@ -1264,6 +1278,11 @@ async function main() {
         }
         break;
       }
+      case "sessionreset":
+      case "session_reset":
+        sessionReset = true;
+        logInfo("CMD session reset");
+        break;
       default:
         break;
     }
@@ -1276,6 +1295,7 @@ async function main() {
       recomputeSteps,
       walletChanged,
       mintChanged,
+      sessionReset,
     };
   }
 
@@ -1500,6 +1520,7 @@ async function main() {
     state.stats.totalSolSpentLamports = (
       BigInt(state.stats.totalSolSpentLamports) + actualSpent
     ).toString();
+    state.costBasisEstimated = false;
     if (options.incrementStep !== false) {
       state.stepIndex = stepIndex + 1;
     }
@@ -1884,6 +1905,7 @@ async function main() {
     let recomputeSteps = false;
     let walletChanged = false;
     let mintChanged = false;
+    let sessionReset = false;
     if (commandRead.entries.length) {
       for (const entry of commandRead.entries) {
         const result = applyCommand(entry);
@@ -1894,8 +1916,22 @@ async function main() {
         recomputeSteps = recomputeSteps || result.recomputeSteps;
         walletChanged = walletChanged || result.walletChanged;
         mintChanged = mintChanged || result.mintChanged;
+        sessionReset = sessionReset || result.sessionReset;
       }
       state.lastCommandLine = commandRead.nextIndex;
+      writeState(state);
+    }
+
+    if (sessionReset) {
+      const currentBalance = await connection.getBalance(
+        keypair.publicKey,
+        "confirmed"
+      );
+      state.startSolBalanceLamports = currentBalance.toString();
+      state.sessionStartTs = ts();
+      if (state.stats) {
+        state.stats.startedAt = ts();
+      }
       writeState(state);
     }
 
@@ -1961,6 +1997,21 @@ async function main() {
             await getCurrentPriceScaled();
           } catch (err) {
             logWarn("Price refresh failed", { error: err.message || err });
+          }
+        }
+        if (refreshedTokens > 0n) {
+          const totalSpent = BigInt(state.totalSolSpentLamports || "0");
+          if (totalSpent === 0n) {
+            const estimate = estimateSolValueLamports(
+              refreshedTokens,
+              state.lastPriceScaled
+            );
+            if (estimate !== null) {
+              state.totalSolSpentLamports = estimate.toString();
+              state.stats.totalSolSpentLamports = estimate.toString();
+              state.costBasisEstimated = true;
+              logWarn("Cost basis estimated from current price");
+            }
           }
         }
         if (refreshedTokens > 0n || BigInt(state.totalSolSpentLamports || "0") > 0n) {

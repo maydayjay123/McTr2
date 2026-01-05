@@ -444,6 +444,7 @@ function formatStatus(index) {
       ? "ACTIVE"
       : "INACTIVE";
 
+  const pnlSuffix = state?.costBasisEstimated ? " (est)" : "";
   const sheetLines = [
     "MM PROFIT :: STATUS",
     "--------------------",
@@ -458,7 +459,7 @@ function formatStatus(index) {
     `PX       : ${pxShort}`,
     `PX MOVE  : ${move}`,
     `AVG vs PX: ${avgDiffPct}`,
-    `LIVE PNL : ${formatSol(tradePnl)} SOL (${livePnlPct})`,
+    `LIVE PNL : ${formatSol(tradePnl)} SOL (${livePnlPct})${pnlSuffix}`,
     "",
     `TP TARGET: ${tpPct}`,
     `TRAIL    : start ${trailStart.toFixed(1)}% gap ${trailGap.toFixed(1)}% min ${trailMin.toFixed(1)}%`,
@@ -660,6 +661,7 @@ function formatLab(index) {
     `STEPDROP : ${stepDrawdown}   (/step 2 5)`,
     "",
     `SET CA   : /setCA <mint>`,
+    `SESSION  : /sessionreset`,
     `FORCEBUY : /forcebuy`,
     `FORCESELL: /forcesell`,
   ];
@@ -1107,7 +1109,7 @@ async function pollLoop() {
           if (update.message?.message_id) {
             deleteMessage(chatId, update.message.message_id).catch(() => {});
           }
-        } else if (/^\/(minTP|walletUSE|setDEGEN|buyDUMP|stepSIZE|step|setCA)\b/i.test(message)) {
+        } else if (/^\/(minTP|walletUSE|setDEGEN|buyDUMP|stepSIZE|step|setCA|sessionreset)\b/i.test(message)) {
           const cleaned = message.replace(/^\//, "");
           appendCommand(cleaned);
           await sendOrEditPanel(chatId, formatStatus(walletViewIndex), "status");
