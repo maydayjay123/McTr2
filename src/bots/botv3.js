@@ -1072,8 +1072,6 @@ async function main() {
     let forceSell = false;
     let manualBuy = null;
     let manualSell = null;
-    let manualBuy = null;
-    let manualSell = null;
     let recomputeSteps = false;
     let walletChanged = false;
     let mintChanged = false;
