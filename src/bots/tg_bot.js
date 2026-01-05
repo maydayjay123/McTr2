@@ -1,39 +1,47 @@
-require("dotenv").config();
-const fs = require("fs");
 const path = require("path");
+require("dotenv").config({ path: path.join(__dirname, "..", "..", ".env") });
+const fs = require("fs");
 const fetch = global.fetch || require("node-fetch");
+
+const ROOT_DIR = path.join(__dirname, "..", "..");
+const DATA_DIR = process.env.DATA_DIR || path.join(ROOT_DIR, "data");
+const STATE_DIR = process.env.STATE_DIR || path.join(DATA_DIR, "state");
+const LOG_DIR = process.env.LOG_DIR || path.join(DATA_DIR, "logs");
+const COMMANDS_DIR =
+  process.env.COMMANDS_DIR || path.join(DATA_DIR, "commands");
 
 const BOT_TOKEN = process.env.TG_BOT_TOKEN;
 const CHAT_ID = process.env.TG_CHAT_ID;
 const STATE_PATH =
-  process.env.STATE_PATH || path.join(__dirname, "botv3_state.json");
+  process.env.STATE_PATH || path.join(STATE_DIR, "botv3_state.json");
 const LOG_PATH =
   process.env.LOG_PATH ||
   process.env.BOT_LOG_PATH ||
-  path.join(__dirname, "botv3.log");
+  path.join(LOG_DIR, "botv3.log");
 const COMMANDS_PATH =
-  process.env.TG_COMMANDS_PATH || path.join(__dirname, "tg_commands.jsonl");
+  process.env.TG_COMMANDS_PATH || path.join(COMMANDS_DIR, "tg_commands.jsonl");
 const VOL_COMMANDS_PATH =
-  process.env.VOL_COMMANDS_PATH || path.join(__dirname, "vol_commands.jsonl");
+  process.env.VOL_COMMANDS_PATH ||
+  path.join(COMMANDS_DIR, "vol_commands.jsonl");
 const VOL_STATE_PATH =
-  process.env.VOL_STATE_PATH || path.join(__dirname, "botvol_state.json");
+  process.env.VOL_STATE_PATH || path.join(STATE_DIR, "botvol_state.json");
 const VOL_LOG_PATH =
-  process.env.VOL_LOG_PATH || path.join(__dirname, "botvol.log");
+  process.env.VOL_LOG_PATH || path.join(LOG_DIR, "botvol.log");
 const VOL_WALLETS_FILE =
-  process.env.VOL_WALLETS_FILE || path.join(__dirname, "vol_wallets.json");
+  process.env.VOL_WALLETS_FILE || path.join(ROOT_DIR, "vol_wallets.json");
 const WALLETS_FILE =
-  process.env.WALLETS_FILE || path.join(__dirname, "wallets.json");
+  process.env.WALLETS_FILE || path.join(ROOT_DIR, "wallets.json");
 const STATE_TEMPLATE =
   process.env.BOTV3_STATE_TEMPLATE ||
-  path.join(__dirname, "botv3_state_{index}.json");
+  path.join(STATE_DIR, "botv3_state_{index}.json");
 const LOG_TEMPLATE =
   process.env.BOTV3_LOG_TEMPLATE ||
-  path.join(__dirname, "botv3_{index}.log");
+  path.join(LOG_DIR, "botv3_{index}.log");
 const COMMANDS_TEMPLATE =
   process.env.TG_COMMANDS_TEMPLATE ||
-  path.join(__dirname, "tg_commands_{index}.jsonl");
+  path.join(COMMANDS_DIR, "tg_commands_{index}.jsonl");
 const ALERT_STATE_PATH =
-  process.env.TG_ALERT_STATE_PATH || path.join(__dirname, "tg_alert.json");
+  process.env.TG_ALERT_STATE_PATH || path.join(STATE_DIR, "tg_alert.json");
 
 const DEFAULT_ALERT_MOVE_PCT = Number(process.env.ALERT_MOVE_PCT || 2);
 const DEFAULT_ALERT_WINDOW_SEC = Number(process.env.ALERT_WINDOW_SEC || 30);
@@ -43,6 +51,21 @@ if (!BOT_TOKEN || !CHAT_ID) {
   console.error("Missing TG_BOT_TOKEN or TG_CHAT_ID in .env");
   process.exit(1);
 }
+
+function ensureDir(target) {
+  try {
+    fs.mkdirSync(target, { recursive: true });
+  } catch {}
+}
+
+function ensureDataDirs() {
+  ensureDir(DATA_DIR);
+  ensureDir(STATE_DIR);
+  ensureDir(LOG_DIR);
+  ensureDir(COMMANDS_DIR);
+}
+
+ensureDataDirs();
 
 const API_BASE = `https://api.telegram.org/bot${BOT_TOKEN}`;
 let updateOffset = 0;
@@ -314,9 +337,23 @@ function formatStepPlan() {
 function formatStatus(index) {
   const paths = getPathsForIndex(index);
   const state = readState(paths.statePath);
-  const lines = readLogLines(paths.logPath);
-  const metrics = state?.lastMetrics || findLatestMetrics(lines);
-  const lastTradePnl = findLastTradePnl(lines);
+  const walletList = readWallets();
+  const walletMeta =
+    Number.isFinite(index) && walletList[index] ? walletList[index] : null;
+  let lines = null;
+  let metrics = state?.lastMetrics || null;
+  let lastTradePnl =
+    state?.stats?.lastSellPnlLamports !== undefined
+      ? lamportsToSol(state.stats.lastSellPnlLamports)
+      : null;
+  let tradeCount =
+    typeof state?.stats?.totalSells === "number" ? state.stats.totalSells : null;
+  if (!metrics || lastTradePnl === null || tradeCount === null) {
+    lines = readLogLines(paths.logPath);
+    if (!metrics) metrics = findLatestMetrics(lines);
+    if (lastTradePnl === null) lastTradePnl = findLastTradePnl(lines);
+    if (tradeCount === null) tradeCount = countTrades(lines);
+  }
 
   const mode = state?.mode || metrics?.mode || "unknown";
   const step = metrics?.step || state?.stepIndex || "--";
@@ -325,7 +362,8 @@ function formatStatus(index) {
     typeof state?.activeWalletIndex === "number"
       ? state.activeWalletIndex
       : "--";
-  const walletPubkey = state?.activeWalletPubkey || "--";
+  const walletPubkey =
+    state?.activeWalletPubkey || walletMeta?.publicKey || "--";
   const avg = metrics?.avg || "--";
   const px = metrics?.px || "--";
   const move = metrics?.move || "--";
@@ -340,7 +378,6 @@ function formatStatus(index) {
     const parsed = Number(metrics.solBal);
     solBal = Number.isFinite(parsed) ? parsed : null;
   }
-  const tradeCount = countTrades(lines);
   const trailStart = Number(process.env.TRAILING_START_PCT || 0);
   const trailGap = Number(process.env.TRAILING_GAP_PCT || 0);
   const trailPeak = state?.trailPeakBps ? Number(state.trailPeakBps) / 100 : null;
@@ -362,6 +399,7 @@ function formatStatus(index) {
 
   const tokenShort =
     token.length > 16 ? `${token.slice(0, 6)}...${token.slice(-6)}` : token;
+  const walletName = walletMeta?.name ? `${walletMeta.name} ` : "";
   const walletShort =
     walletPubkey.length > 16
       ? `${walletPubkey.slice(0, 6)}...${walletPubkey.slice(-6)}`
@@ -412,7 +450,7 @@ function formatStatus(index) {
     `MODE     : ${mode}`,
     `STEP     : ${step}   TRADES: ${tradeCount}`,
     `TOKEN    : ${tokenShort}`,
-    `WALLET   : ${walletIndex} ${walletShort} (${activeFlag})`,
+    `WALLET   : ${walletIndex} ${walletName}${walletShort} (${activeFlag})`,
     `ADDRESS  : ${walletPubkey}`,
     `STEPS    : ${stepPlan}`,
     "",
@@ -452,13 +490,23 @@ function formatStatus(index) {
 function formatWalletCard(index) {
   const paths = getPathsForIndex(index);
   const state = readState(paths.statePath);
-  const lines = readLogLines(paths.logPath);
-  const metrics = findLatestMetrics(lines);
+  const walletList = readWallets();
+  const walletMeta =
+    Number.isFinite(index) && walletList[index] ? walletList[index] : null;
+  let lines = null;
+  let metrics = state?.lastMetrics || null;
+  if (!metrics) {
+    lines = readLogLines(paths.logPath);
+    metrics = findLatestMetrics(lines);
+  }
   const walletIndex =
     typeof state?.activeWalletIndex === "number"
       ? state.activeWalletIndex
       : index ?? "--";
-  const walletPubkey = state?.activeWalletPubkey || "--";
+  const walletPubkey =
+    state?.activeWalletPubkey || walletMeta?.publicKey || "--";
+  const walletName = walletMeta?.name || "--";
+  const walletRole = walletMeta?.role || "--";
   const solBal =
     state?.lastSolBalanceLamports !== null &&
     state?.lastSolBalanceLamports !== undefined
@@ -476,6 +524,8 @@ function formatWalletCard(index) {
   const header = "<b>Wallet</b>";
   const body = [
     `Index: <b>${walletIndex}</b>`,
+    `Name: <b>${escapeHtml(walletName)}</b>`,
+    `Role: <b>${escapeHtml(walletRole)}</b>`,
     `Address: <code>${escapeHtml(walletPubkey)}</code>`,
     `Status: <b>${activeFlag}</b>`,
     "",

@@ -1,6 +1,6 @@
-require("dotenv").config();
-const fs = require("fs");
 const path = require("path");
+require("dotenv").config({ path: path.join(__dirname, "..", "..", ".env") });
+const fs = require("fs");
 const readline = require("readline");
 const fetch = global.fetch || require("node-fetch");
 const {
@@ -9,6 +9,13 @@ const {
   PublicKey,
   VersionedTransaction,
 } = require("@solana/web3.js");
+
+const ROOT_DIR = path.join(__dirname, "..", "..");
+const DATA_DIR = process.env.DATA_DIR || path.join(ROOT_DIR, "data");
+const STATE_DIR = process.env.STATE_DIR || path.join(DATA_DIR, "state");
+const LOG_DIR = process.env.LOG_DIR || path.join(DATA_DIR, "logs");
+const COMMANDS_DIR =
+  process.env.COMMANDS_DIR || path.join(DATA_DIR, "commands");
 
 const RPC_URL = process.env.SOLANA_RPC_URL;
 const WALLET_INDEX_RAW = process.env.WALLET_INDEX;
@@ -20,17 +27,17 @@ const RPC_URLS = (process.env.SOLANA_RPC_URLS || process.env.RPC_URLS || "")
   .map((item) => item.trim())
   .filter(Boolean);
 const WALLETS_FILE =
-  process.env.WALLETS_FILE || path.join(__dirname, "wallets.json");
+  process.env.WALLETS_FILE || path.join(ROOT_DIR, "wallets.json");
 const STATE_FILE =
   process.env.BOTV3_STATE_PATH ||
   path.join(
-    __dirname,
+    STATE_DIR,
     WALLET_INDEX !== null ? `botv3_state_${WALLET_INDEX}.json` : "botv3_state.json"
   );
 const COMMANDS_PATH =
   process.env.TG_COMMANDS_PATH ||
   path.join(
-    __dirname,
+    COMMANDS_DIR,
     WALLET_INDEX !== null ? `tg_commands_${WALLET_INDEX}.jsonl` : "tg_commands.jsonl"
   );
 const SOL_MINT = "So11111111111111111111111111111111111111112";
@@ -71,10 +78,23 @@ const BALANCE_REFRESH_MS = Number(process.env.BALANCE_REFRESH_MS || 30000);
 const LOG_FILE =
   process.env.BOT_LOG_PATH ||
   path.join(
-    __dirname,
+    LOG_DIR,
     WALLET_INDEX !== null ? `botv3_${WALLET_INDEX}.log` : "botv3.log"
   );
 const LOG_TO_CONSOLE = process.env.LOG_TO_CONSOLE !== "false";
+
+function ensureDir(target) {
+  try {
+    fs.mkdirSync(target, { recursive: true });
+  } catch {}
+}
+
+function ensureDataDirs() {
+  ensureDir(DATA_DIR);
+  ensureDir(STATE_DIR);
+  ensureDir(LOG_DIR);
+  ensureDir(COMMANDS_DIR);
+}
 
 function loadWalletFile() {
   if (!fs.existsSync(WALLETS_FILE)) {
@@ -730,6 +750,7 @@ function createWallet(walletFile) {
 }
 
 async function main() {
+  ensureDataDirs();
   const rpcUrls = buildRpcUrls();
   if (!rpcUrls.length) {
     logError("Missing SOLANA_RPC_URL env var.");
@@ -759,16 +780,19 @@ async function main() {
     walletIndex: WALLET_INDEX !== null ? WALLET_INDEX : "auto",
   });
 
+  const walletEntry = wallets[WALLET_INDEX !== null ? WALLET_INDEX : 0];
   let tokenMint = process.env.TARGET_MINT || "";
   if (!tokenMint) {
+    tokenMint =
+      walletEntry?.targetMint || walletEntry?.mint || walletEntry?.tokenMint || "";
+  }
+  if (!tokenMint && process.stdin.isTTY) {
     const prompt = createPrompt();
     tokenMint = await prompt.ask("Target token mint", "");
     prompt.close();
   }
-
   if (!tokenMint) {
-    logError("Target token mint is required.");
-    process.exit(1);
+    logWarn("No target mint set. Waiting for /setCA <mint>.");
   }
 
   const stepSol = parseNumberList(
@@ -814,7 +838,8 @@ async function main() {
     process.env.SELL_SLIPPAGE_CAP_BPS || DEFAULT_SELL_SLIPPAGE_CAP_BPS
   );
   const sellPnlLogPath =
-    process.env.SELL_PNL_LOG_PATH || DEFAULT_SELL_PNL_LOG;
+    process.env.SELL_PNL_LOG_PATH ||
+    path.join(DATA_DIR, DEFAULT_SELL_PNL_LOG);
   const confirmTimeoutMs = Number(
     process.env.CONFIRM_TIMEOUT_MS || DEFAULT_CONFIRM_TIMEOUT_MS
   );
@@ -926,7 +951,7 @@ async function main() {
   state.startSolBalanceLamports = null;
   state.sessionStartTs = ts();
 
-  let mintPubkey = new PublicKey(tokenMint);
+  let mintPubkey = tokenMint ? new PublicKey(tokenMint) : null;
   const sessionStartBalance = await connection.getBalance(
     keypair.publicKey,
     "confirmed"
@@ -1845,6 +1870,7 @@ async function main() {
   }
 
   let backoffMs = 0;
+  let waitingForMintLogged = false;
   while (true) {
     try {
     if (backoffMs > 0) {
@@ -1872,6 +1898,16 @@ async function main() {
       state.lastCommandLine = commandRead.nextIndex;
       writeState(state);
     }
+
+    if (!tokenMint || !mintPubkey) {
+      if (!waitingForMintLogged) {
+        logWarn("Waiting for target mint. Use /setCA <mint>.");
+        waitingForMintLogged = true;
+      }
+      await sleepWithCommandWake(pollMs);
+      continue;
+    }
+    waitingForMintLogged = false;
 
     if (walletChanged || mintChanged) {
       const newBalance = await connection.getBalance(

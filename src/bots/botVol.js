@@ -1,6 +1,6 @@
-require("dotenv").config();
-const fs = require("fs");
 const path = require("path");
+require("dotenv").config({ path: path.join(__dirname, "..", "..", ".env") });
+const fs = require("fs");
 const fetch = global.fetch || require("node-fetch");
 const {
   Connection,
@@ -11,6 +11,13 @@ const {
   Transaction,
 } = require("@solana/web3.js");
 
+const ROOT_DIR = path.join(__dirname, "..", "..");
+const DATA_DIR = process.env.DATA_DIR || path.join(ROOT_DIR, "data");
+const STATE_DIR = process.env.STATE_DIR || path.join(DATA_DIR, "state");
+const LOG_DIR = process.env.LOG_DIR || path.join(DATA_DIR, "logs");
+const COMMANDS_DIR =
+  process.env.COMMANDS_DIR || path.join(DATA_DIR, "commands");
+
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 const JUP_BASE_URL = process.env.JUPITER_API_BASE || "https://lite-api.jup.ag";
 const RPC_URLS = (process.env.SOLANA_RPC_URLS || process.env.RPC_URLS || "")
@@ -18,18 +25,22 @@ const RPC_URLS = (process.env.SOLANA_RPC_URLS || process.env.RPC_URLS || "")
   .map((item) => item.trim())
   .filter(Boolean);
 const RPC_URL = process.env.SOLANA_RPC_URL;
+const MAIN_WALLETS_FILE =
+  process.env.MAIN_WALLETS_FILE || path.join(ROOT_DIR, "wallets.json");
+const VOL_PARENT_INDEX_RAW =
+  process.env.VOL_PARENT_INDEX || process.env.VOL_PARENT_WALLET_INDEX;
 
 const VOL_TARGET_MINT = process.env.VOL_TARGET_MINT || process.env.TARGET_MINT;
 const WALLETS_FILE =
-  process.env.VOL_WALLETS_FILE || path.join(__dirname, "vol_wallets.json");
+  process.env.VOL_WALLETS_FILE || path.join(ROOT_DIR, "vol_wallets.json");
 const STATE_FILE =
-  process.env.VOL_STATE_FILE || path.join(__dirname, "botvol_state.json");
+  process.env.VOL_STATE_FILE || path.join(STATE_DIR, "botvol_state.json");
 const COMMANDS_FILE =
-  process.env.VOL_COMMANDS_PATH || path.join(__dirname, "vol_commands.jsonl");
+  process.env.VOL_COMMANDS_PATH || path.join(COMMANDS_DIR, "vol_commands.jsonl");
 const LOG_FILE =
-  process.env.VOL_LOG_PATH || path.join(__dirname, "botvol.log");
+  process.env.VOL_LOG_PATH || path.join(LOG_DIR, "botvol.log");
 const DATA_LOG =
-  process.env.VOL_DATA_LOG_PATH || path.join(__dirname, "botvol_data.log");
+  process.env.VOL_DATA_LOG_PATH || path.join(LOG_DIR, "botvol_data.log");
 
 const DEFAULT_VOL_WALLET_COUNT = 2;
 const DEFAULT_MM_WALLET_COUNT = 1;
@@ -58,6 +69,19 @@ const BALANCE_THRESHOLD_LAMPORTS = 100000n;
 
 function ts() {
   return new Date().toISOString().replace("T", " ").split(".")[0];
+}
+
+function ensureDir(target) {
+  try {
+    fs.mkdirSync(target, { recursive: true });
+  } catch {}
+}
+
+function ensureDataDirs() {
+  ensureDir(DATA_DIR);
+  ensureDir(STATE_DIR);
+  ensureDir(LOG_DIR);
+  ensureDir(COMMANDS_DIR);
 }
 
 function logLine(line) {
@@ -136,13 +160,43 @@ function loadWalletFile() {
   return JSON.parse(raw);
 }
 
+function loadMainWallets() {
+  if (!fs.existsSync(MAIN_WALLETS_FILE)) return [];
+  const raw = fs.readFileSync(MAIN_WALLETS_FILE, "utf8");
+  if (!raw.trim()) return [];
+  try {
+    const data = JSON.parse(raw);
+    return Array.isArray(data.wallets) ? data.wallets : [];
+  } catch (err) {
+    logWarn("Main wallets.json parse failed", { error: err.message || err });
+    return [];
+  }
+}
+
+function resolveParentWallet(mainWallets) {
+  if (Number.isFinite(Number(VOL_PARENT_INDEX_RAW))) {
+    const index = Number(VOL_PARENT_INDEX_RAW);
+    if (mainWallets[index]) {
+      return mainWallets[index];
+    }
+    logWarn("VOL_PARENT_INDEX out of range", { index });
+  }
+  const byRole = mainWallets.find((wallet) => wallet.role === "vol_parent");
+  return byRole || null;
+}
+
 function saveWalletFile(data) {
   fs.writeFileSync(WALLETS_FILE, JSON.stringify(data, null, 2), "utf8");
 }
 
-function ensureWallets(state) {
+function ensureWallets(state, parentOverride) {
   const data = loadWalletFile();
-  if (!data.parent) {
+  if (parentOverride) {
+    data.parent = {
+      publicKey: parentOverride.publicKey,
+      secretKey: Array.from(parentOverride.secretKey),
+    };
+  } else if (!data.parent) {
     const parent = Keypair.generate();
     data.parent = {
       publicKey: parent.publicKey.toBase58(),
@@ -485,6 +539,7 @@ async function transferSol(connection, fromKeypair, toPubkey, lamports) {
 }
 
 async function main() {
+  ensureDataDirs();
   const rpcUrls = buildRpcUrls();
   if (!rpcUrls.length) {
     logError("Missing SOLANA_RPC_URL or SOLANA_RPC_URLS");
@@ -504,10 +559,16 @@ async function main() {
     writeState(state);
     logInfo("Target mint updated from env", { mint: state.targetMint });
   }
-  let wallets = ensureWallets(state);
-  const parentKeypair = Keypair.fromSecretKey(
-    Uint8Array.from(wallets.parent.secretKey)
-  );
+  const mainWallets = loadMainWallets();
+  const parentOverride = resolveParentWallet(mainWallets);
+  let wallets = ensureWallets(state, parentOverride);
+  const parentKeypair = parentOverride
+    ? Keypair.fromSecretKey(Uint8Array.from(parentOverride.secretKey))
+    : Keypair.fromSecretKey(Uint8Array.from(wallets.parent.secretKey));
+  logInfo("Parent wallet", {
+    source: parentOverride ? "wallets.json" : "vol_wallets.json",
+    pubkey: parentKeypair.publicKey.toBase58(),
+  });
   const mintPubkey = new PublicKey(state.targetMint);
 
   logInfo("VOL config", {
@@ -575,7 +636,7 @@ async function main() {
         state.lastCommandLine = commandRead.nextIndex;
         writeState(state);
         if (walletConfigChanged) {
-          wallets = ensureWallets(state);
+          wallets = ensureWallets(state, parentOverride);
           logInfo("Wallets refreshed", {
             volWallets: wallets.volWallets.length,
             mmWallets: wallets.mmWallets.length,
