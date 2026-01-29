@@ -13,7 +13,8 @@ tg_bot*.log
 sell_pnl.log
 pnl_report.csv
 backups/
-data/
+data/*.log
+!data/state.json
 ta.json
 ta_backtest.txt
 node_modules/
