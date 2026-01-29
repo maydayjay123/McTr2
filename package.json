@@ -1,25 +1,20 @@
 {
-    "name":  "mm-profit",
-    "version":  "0.2.0",
-    "private":  true,
-    "description":  "Professional Solana Trading Bot with Advanced Features",
-    "main":  "sweep.js",
-    "scripts":  {
-        "start":  "node sweep.js",
-        "swap":  "node swap.js",
-        "sell":  "node sell.js",
-        "bot":  "node src/bots/bot_manager.js",
-        "botv3": "node src/bots/botv3.js",
-        "botv4": "node src/bots/botv4.js",
-        "manager": "node src/bots/bot_manager.js",
-        "vol": "node src/bots/botVol.js",
-        "tg": "node src/bots/tg_bot.js",
-        "tg2": "node src/bots/tg_bot_v2.js",
-        "pnl":  "node pnl_report.js"
+    "name": "mm-profit",
+    "version": "1.0.0",
+    "private": true,
+    "description": "Simple & Dynamic Solana Trading Bot",
+    "main": "bot.js",
+    "scripts": {
+        "start": "node bot.js",
+        "bot": "node bot.js",
+        "tg": "node telegram.js",
+        "check": "node check.js",
+        "swap": "node swap.js",
+        "sell": "node sell.js"
     },
-    "dependencies":  {
-        "@solana/web3.js":  "^1.95.4",
-        "dotenv":  "^16.4.5",
-        "node-fetch":  "^2.6.12"
+    "dependencies": {
+        "@solana/web3.js": "^1.95.4",
+        "dotenv": "^16.4.5",
+        "node-fetch": "^2.6.12"
     }
 }
